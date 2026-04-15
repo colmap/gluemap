@@ -156,8 +156,7 @@ def prune_non_virtual_points3D(
     to_remove = []
     for p3d_id, p3d in reconstruction.points3D.items():
         has_virtual = any(
-            elem.point2D_idx
-            >= virtual_point_start.get(elem.image_id, float("inf"))
+            elem.point2D_idx >= virtual_point_start.get(elem.image_id, float("inf"))
             for elem in p3d.track.elements
         )
         if not has_virtual:
@@ -245,9 +244,7 @@ def update_poses_from_reconstruction(
     for target_id, target_img in target_recon.images.items():
         if target_img.name in source_by_name:
             src_id, src_img = source_by_name[target_img.name]
-            target_recon.frames[
-                target_id
-            ].rig_from_world = src_img.cam_from_world()
+            target_recon.frames[target_id].rig_from_world = src_img.cam_from_world()
     # Copy camera intrinsics
     for cam_id, cam in source_recon.cameras.items():
         if cam_id in target_recon.cameras:
@@ -284,9 +281,11 @@ def _extract_reconstruction_arrays(recon: pycolmap.Reconstruction):
         names,
         np.array(ids, dtype=np.int64),
         np.array(n_pts2d, dtype=np.int32),
-        np.array(xyz_list, dtype=np.float64)
-        if xyz_list
-        else np.empty((0, 3), dtype=np.float64),
+        (
+            np.array(xyz_list, dtype=np.float64)
+            if xyz_list
+            else np.empty((0, 3), dtype=np.float64)
+        ),
         img_ids_flat,
         pt2d_idxs_flat,
         np.array(lens, dtype=np.int32),
@@ -335,10 +334,7 @@ def merge_triangulated_with_reconstruction(
     ) = _extract_reconstruction_arrays(reconstruction)
 
     vps = {int(k): int(v) for k, v in virtual_point_start.items()}
-    ndo = {
-        int(k): {int(x) for x in v}
-        for k, v in negative_depth_observations.items()
-    }
+    ndo = {int(k): {int(x) for x in v} for k, v in negative_depth_observations.items()}
 
     result = pygluemap.compute_merge_data(
         tri_names,
@@ -372,9 +368,7 @@ def merge_triangulated_with_reconstruction(
     for cam_id, cam in reconstruction.cameras.items():
         merged.add_camera_with_trivial_rig(cam)
 
-    tri_by_name = {
-        img.name: img for img in triangulated_reconstruction.images.values()
-    }
+    tri_by_name = {img.name: img for img in triangulated_reconstruction.images.values()}
     for recon_id, img in reconstruction.images.items():
         tri_img = tri_by_name.get(img.name)
         if tri_img:
@@ -423,6 +417,59 @@ def merge_triangulated_with_reconstruction(
         offset += track_len
 
     return merged, new_vps, new_ndo
+
+
+def filter_reconstruction_by_angular_error(
+    reconstruction: pycolmap.Reconstruction,
+    angular_error_threshold_deg: float,
+    negative_depth_observations: dict,
+    virtual_point_start: dict,
+    fisheye_cameras=None,
+):
+    """Filter the reconstruction in place using an angular reprojection error
+    threshold, logging error statistics and the number of removed observations
+    / tracks."""
+    logger.info(
+        f"Filtering reconstruction by angular error "
+        f"(threshold={angular_error_threshold_deg} deg)..."
+    )
+    angular_errors = compute_all_errors_from_reconstruction(
+        reconstruction,
+        ReprojectionErrorType.ANGULAR,
+        negative_depth_observations,
+        virtual_point_start=virtual_point_start,
+        fisheye_cameras=fisheye_cameras,
+    )
+
+    all_angular = [
+        e for errs in angular_errors.values() for _, _, e in errs if e < float("inf")
+    ]
+    if len(all_angular) > 0:
+        all_angular_arr = np.array(all_angular)
+        logger.info(
+            f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
+            f"median={np.median(all_angular_arr):.2f} deg, "
+            f"max={np.max(all_angular_arr):.2f} deg"
+        )
+        logger.info(
+            f"  < {angular_error_threshold_deg} deg: "
+            f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
+        )
+
+    num_points_before = len(reconstruction.points3D)
+    obs_removed, tracks_removed = filter_observations_by_error(
+        reconstruction,
+        angular_errors,
+        angular_error_threshold_deg,
+        min_track_length=2,
+    )
+    logger.info(
+        f"  Angular filter: removed {obs_removed} observations, "
+        f"{tracks_removed} tracks"
+    )
+    logger.info(
+        f"  Points3D: {num_points_before} -> " f"{len(reconstruction.points3D)}"
+    )
 
 
 def run_refinement_pipeline(
@@ -634,7 +681,8 @@ def run_refinement_pipeline(
     # TODO: fix this
     virtual_point_start = {
         # img_id + 1: v for img_id, v in virtual_point_start.items()
-        img_id + 1: 100000 for img_id, v in virtual_point_start.items()
+        img_id + 1: 100000
+        for img_id, v in virtual_point_start.items()
     }
     negative_depth_observations = {
         img_id + 1: s for img_id, s in negative_depth_observations.items()
@@ -652,7 +700,6 @@ def run_refinement_pipeline(
         logger.info(f"{'=' * 60}")
         t_iter_start = time.perf_counter()
 
-
         # Step 1e: Triangulate on merged database
         t_tri_start = time.perf_counter()
         opt_triang = pycolmap.IncrementalPipelineOptions()
@@ -660,9 +707,7 @@ def run_refinement_pipeline(
         opt_triang.triangulation.merge_max_reproj_error = 15.0
         opt_triang.triangulation.complete_max_reproj_error = 15.0
         opt_triang.triangulation.ignore_two_view_tracks = False
-        opt_triang.triangulation.create_max_angle_error = (
-            angular_error_threshold_deg
-        )
+        opt_triang.triangulation.create_max_angle_error = angular_error_threshold_deg
         opt_triang.ba_global_max_refinements = 0
 
         reconstruction = pycolmap.triangulate_points(
@@ -696,69 +741,57 @@ def run_refinement_pipeline(
         fisheye_intrinsics_params = None
         fisheye_cameras = None
 
-        # Step 7.5: Filter tracks by angular error before bundle adjustment
+        # Step 7.5: Filter tracks before bundle adjustment
         t_filter_start = time.perf_counter()
         if angular_error_threshold_deg > 0:
-            logger.info(
-                f"Filtering tracks by angular error "
-                f"(threshold={angular_error_threshold_deg} deg)..."
-            )
-            for rec in [reconstruction, virtual_reconstruction]:
-                angular_errors = compute_all_errors_from_reconstruction(
-                    rec,
-                    ReprojectionErrorType.ANGULAR,
-                    negative_depth_observations,
-                    virtual_point_start=virtual_point_start,
-                    fisheye_cameras=fisheye_cameras,
+            # Real reconstruction: try pycolmap's built-in observation filter,
+            # fall back to filter_reconstruction_by_angular_error on failure
+            try:
+                num_points_before = len(reconstruction.points3D)
+                obs_manager = pycolmap.ObservationManager(reconstruction)
+                points3d_ids = set(reconstruction.points3D.keys())
+                num_filtered = (
+                    obs_manager.filter_points3D_with_large_reprojection_error(
+                        angular_error_threshold_deg,
+                        points3d_ids,
+                        pycolmap.ReprojectionErrorType.ANGULAR,  # error_type
+                    )
                 )
-
-                all_angular = [
-                    e
-                    for errs in angular_errors.values()
-                    for _, _, e in errs
-                    if e < float("inf")
-                ]
-                if len(all_angular) > 0:
-                    all_angular_arr = np.array(all_angular)
-                    logger.info(
-                        f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
-                        f"median={np.median(all_angular_arr):.2f} deg, "
-                        f"max={np.max(all_angular_arr):.2f} deg"
-                    )
-                    logger.info(
-                        f"  < {angular_error_threshold_deg} deg: "
-                        f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
-                    )
-
-                num_points_before = len(rec.points3D)
-                obs_removed, tracks_removed = filter_observations_by_error(
-                    rec,
-                    angular_errors,
+                obs_manager.filter_points3D_with_short_tracks(min_track_length=2)
+                logger.info(
+                    f"Real reconstruction: pycolmap filter removed "
+                    f"{num_filtered} observations, points3D "
+                    f"{num_points_before} -> {len(reconstruction.points3D)}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"pycolmap observation filter failed ({e}); "
+                    f"falling back to filter_reconstruction_by_angular_error"
+                )
+                filter_reconstruction_by_angular_error(
+                    reconstruction,
                     angular_error_threshold_deg,
-                    min_track_length=2,
+                    dict(),  # no negative depth filtering for real tracks
+                    dict(),
                 )
-                logger.info(
-                    f"  Angular filter: removed {obs_removed} observations, "
-                    f"{tracks_removed} tracks"
-                )
-                logger.info(
-                    f"  Points3D: {num_points_before} -> "
-                    f"{len(rec.points3D)}"
-                )
+
+            # Virtual reconstruction: keep the angular-error filter path
+            filter_reconstruction_by_angular_error(
+                virtual_reconstruction,
+                angular_error_threshold_deg,
+                negative_depth_observations,
+                virtual_point_start,
+                fisheye_cameras=fisheye_cameras,
+            )
 
         t_filter_end = time.perf_counter()
 
         # Step 7c: Limit number of tracks before BA
         max_num_tracks = getattr(args, "max_num_tracks", None)
-        if (
-            max_num_tracks is not None
-            and len(reconstruction.points3D) > max_num_tracks
-        ):
+        if max_num_tracks is not None and len(reconstruction.points3D) > max_num_tracks:
             sorted_ids = sorted(
                 reconstruction.points3D.keys(),
-                key=lambda pid: len(
-                    list(reconstruction.points3D[pid].track.elements)
-                ),
+                key=lambda pid: len(list(reconstruction.points3D[pid].track.elements)),
                 reverse=True,
             )
             ids_to_remove = sorted_ids[max_num_tracks:]
