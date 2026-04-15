@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 import os
 import shutil
@@ -140,7 +141,7 @@ def select_tracks_from_merged(
     )
 
     for p3d_id in ids_to_delete:
-        del reconstruction.points3D[int(p3d_id)]
+        reconstruction.delete_point3D(int(p3d_id))
 
 
 def prune_non_virtual_points3D(
@@ -162,7 +163,7 @@ def prune_non_virtual_points3D(
         if not has_virtual:
             to_remove.append(p3d_id)
     for p3d_id in to_remove:
-        del reconstruction.points3D[p3d_id]
+        reconstruction.delete_point3D(p3d_id)
     return len(to_remove)
 
 
@@ -606,7 +607,7 @@ def run_refinement_pipeline(
 
     # Step 5: Build reconstruction from current data
     t0 = time.perf_counter()
-    reconstruction = build_reconstruction_for_ba(
+    virtual_reconstruction = build_reconstruction_for_ba(
         global_rotations,
         global_centers,
         global_intrinsics,
@@ -618,6 +619,7 @@ def run_refinement_pipeline(
         camera_model=dataset_pair.camera_model,
     )
     refinement_timing["build_reconstruction"] = time.perf_counter() - t0
+    reconstruction = deepcopy(virtual_reconstruction)
 
     # Step 6: Build negative depth and virtual point data
     # Original: build from pts2d_idx_inv
@@ -629,8 +631,10 @@ def run_refinement_pipeline(
 
     # build_reconstruction_for_ba produces a 1-indexed reconstruction; shift
     # the per-image dicts by +1 so their keys line up with reconstruction image IDs.
+    # TODO: fix this
     virtual_point_start = {
-        img_id + 1: v for img_id, v in virtual_point_start.items()
+        # img_id + 1: v for img_id, v in virtual_point_start.items()
+        img_id + 1: 100000 for img_id, v in virtual_point_start.items()
     }
     negative_depth_observations = {
         img_id + 1: s for img_id, s in negative_depth_observations.items()
@@ -648,27 +652,6 @@ def run_refinement_pipeline(
         logger.info(f"{'=' * 60}")
         t_iter_start = time.perf_counter()
 
-        if outer_iter > 0:
-            # Prune all non-virtual 3D points (keep only virtual)
-            num_pruned = prune_non_virtual_points3D(
-                # reconstruction, original_virtual_point_start
-                reconstruction,
-                virtual_point_start,
-            )
-            logger.info(
-                f"Pruned {num_pruned} non-virtual 3D points, "
-                f"{len(reconstruction.points3D)} virtual points remaining"
-            )
-
-            # Strip previously prepended DB keypoints so image point counts
-            # don't grow with each iteration
-            reconstruction, virtual_point_start, negative_depth_observations = (
-                strip_non_virtual_keypoints(
-                    reconstruction,
-                    virtual_point_start,
-                    negative_depth_observations,
-                )
-            )
 
         # Step 1e: Triangulate on merged database
         t_tri_start = time.perf_counter()
@@ -682,7 +665,7 @@ def run_refinement_pipeline(
         )
         opt_triang.ba_global_max_refinements = 0
 
-        triangulated_reconstruction = pycolmap.triangulate_points(
+        reconstruction = pycolmap.triangulate_points(
             reconstruction,
             database_path,
             ".",  # skip color extraction
@@ -692,20 +675,6 @@ def run_refinement_pipeline(
             options=opt_triang,
         )
         t_tri_end = time.perf_counter()
-
-        # Step 7: Merge triangulated 3D points into reconstruction
-        t_merge_start = time.perf_counter()
-        reconstruction, virtual_point_start, negative_depth_observations = (
-            merge_triangulated_with_reconstruction(
-                triangulated_reconstruction,
-                reconstruction,
-                virtual_point_start,
-                negative_depth_observations,
-                triangulated_features_first=True,
-            )
-        )
-
-        t_merge_end = time.perf_counter()
 
         # Step 7a: Selectively prune prior/virtual tracks (SelectTrack logic)
         sift_count = {}
@@ -734,47 +703,48 @@ def run_refinement_pipeline(
                 f"Filtering tracks by angular error "
                 f"(threshold={angular_error_threshold_deg} deg)..."
             )
-            angular_errors = compute_all_errors_from_reconstruction(
-                reconstruction,
-                ReprojectionErrorType.ANGULAR,
-                negative_depth_observations,
-                virtual_point_start=virtual_point_start,
-                fisheye_cameras=fisheye_cameras,
-            )
-
-            all_angular = [
-                e
-                for errs in angular_errors.values()
-                for _, _, e in errs
-                if e < float("inf")
-            ]
-            if len(all_angular) > 0:
-                all_angular_arr = np.array(all_angular)
-                logger.info(
-                    f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
-                    f"median={np.median(all_angular_arr):.2f} deg, "
-                    f"max={np.max(all_angular_arr):.2f} deg"
-                )
-                logger.info(
-                    f"  < {angular_error_threshold_deg} deg: "
-                    f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
+            for rec in [reconstruction, virtual_reconstruction]:
+                angular_errors = compute_all_errors_from_reconstruction(
+                    rec,
+                    ReprojectionErrorType.ANGULAR,
+                    negative_depth_observations,
+                    virtual_point_start=virtual_point_start,
+                    fisheye_cameras=fisheye_cameras,
                 )
 
-            num_points_before = len(reconstruction.points3D)
-            _, obs_removed, tracks_removed = filter_observations_by_error(
-                reconstruction.points3D,
-                angular_errors,
-                angular_error_threshold_deg,
-                min_track_length=2,
-            )
-            logger.info(
-                f"  Angular filter: removed {obs_removed} observations, "
-                f"{tracks_removed} tracks"
-            )
-            logger.info(
-                f"  Points3D: {num_points_before} -> "
-                f"{len(reconstruction.points3D)}"
-            )
+                all_angular = [
+                    e
+                    for errs in angular_errors.values()
+                    for _, _, e in errs
+                    if e < float("inf")
+                ]
+                if len(all_angular) > 0:
+                    all_angular_arr = np.array(all_angular)
+                    logger.info(
+                        f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
+                        f"median={np.median(all_angular_arr):.2f} deg, "
+                        f"max={np.max(all_angular_arr):.2f} deg"
+                    )
+                    logger.info(
+                        f"  < {angular_error_threshold_deg} deg: "
+                        f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
+                    )
+
+                num_points_before = len(rec.points3D)
+                obs_removed, tracks_removed = filter_observations_by_error(
+                    rec,
+                    angular_errors,
+                    angular_error_threshold_deg,
+                    min_track_length=2,
+                )
+                logger.info(
+                    f"  Angular filter: removed {obs_removed} observations, "
+                    f"{tracks_removed} tracks"
+                )
+                logger.info(
+                    f"  Points3D: {num_points_before} -> "
+                    f"{len(rec.points3D)}"
+                )
 
         t_filter_end = time.perf_counter()
 
@@ -801,8 +771,9 @@ def run_refinement_pipeline(
 
         # Step 8: Run iterative bundle adjustment
         t_ba_start = time.perf_counter()
-        reconstruction = iterative_bundle_adjustment(
+        reconstruction, virtual_reconstruction = iterative_bundle_adjustment(
             reconstruction,
+            virtual_reconstruction,
             negative_depth_observations,
             virtual_point_start,
             options=ba_options,
@@ -812,7 +783,6 @@ def run_refinement_pipeline(
 
         iter_timing = {
             "triangulation": t_tri_end - t_tri_start,
-            "merge": t_merge_end - t_merge_start,
             "filter": t_filter_end - t_filter_start,
             "ba": t_ba_end - t_ba_start,
             "total": t_ba_end - t_iter_start,
@@ -820,7 +790,7 @@ def run_refinement_pipeline(
         iteration_timings.append(iter_timing)
         logger.info(
             f"[Profiling] Iteration {outer_iter + 1}: triangulation={iter_timing['triangulation']:.2f}s, "
-            f"merge={iter_timing['merge']:.2f}s, filter={iter_timing['filter']:.2f}s, "
+            f"filter={iter_timing['filter']:.2f}s, "
             f"ba={iter_timing['ba']:.2f}s, total={iter_timing['total']:.2f}s"
         )
 
@@ -846,7 +816,7 @@ def run_refinement_pipeline(
                 virtual_point3D_ids.append(point3D_id)
 
         for point3D_id in virtual_point3D_ids:
-            del reconstruction.points3D[point3D_id]
+            reconstruction.delete_point3D(point3D_id)
 
         logger.info(
             f"Removed {len(virtual_point3D_ids)} virtual 3D points, {len(reconstruction.points3D)} real points remaining"
