@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 static inline uint64_t CanonicalPairKey(int64_t id1, int64_t id2) {
@@ -24,8 +26,11 @@ static inline uint64_t CanonicalPairKey(int64_t id1, int64_t id2) {
 //   track_lengths:    (N,)           int32  – number of elements per track
 //   sift_count:          {image_id -> int}
 //
-// Returns: vector of point3D IDs that should be deleted.
-std::vector<int64_t>
+// Returns: a pair of
+//   - vector of point3D IDs that should be deleted,
+//   - map from canonical image-pair (img_low, img_high) to coverage count
+//     after selection (SIFT contributions plus kept non-SIFT contributions).
+std::pair<std::vector<int64_t>, std::map<std::pair<int64_t, int64_t>, int>>
 SelectTracksToDelete(const std::vector<int64_t> &point3d_ids,
                      const std::vector<int64_t> &track_image_ids,
                      const std::vector<int64_t> &track_pt2d_idxs,
@@ -120,11 +125,20 @@ SelectTracksToDelete(const std::vector<int64_t> &point3d_ids,
             << num_non_sift_selected << "/" << non_sift_idxs.size()
             << " non-SIFT, removed " << ids_to_remove.size() << std::endl;
 
-  return ids_to_remove;
+  // Unpack canonical uint64 keys into (img_low, img_high) pairs for the Python
+  // boundary.
+  std::map<std::pair<int64_t, int64_t>, int> pair_count_out;
+  for (const auto &kv : pair_count) {
+    const int64_t img_low = static_cast<int64_t>(kv.first >> 32);
+    const int64_t img_high = static_cast<int64_t>(kv.first & 0xFFFFFFFFULL);
+    pair_count_out.emplace(std::make_pair(img_low, img_high), kv.second);
+  }
+
+  return {std::move(ids_to_remove), std::move(pair_count_out)};
 }
 
 // ── Numpy wrapper ────────────────────────────────────────────────────────────
-py::array_t<int64_t> ComputeTracksToDeleteWrapper(
+py::tuple ComputeTracksToDeleteWrapper(
     py::array_t<int64_t, py::array::c_style> point3d_ids,
     py::array_t<int64_t, py::array::c_style> track_image_ids,
     py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
@@ -143,9 +157,10 @@ py::array_t<int64_t> ComputeTracksToDeleteWrapper(
                                 track_lengths.data() + track_lengths.size());
 
   // call core
-  std::vector<int64_t> to_delete =
+  auto result =
       SelectTracksToDelete(ids_vec, img_ids_vec, pt2d_vec, lens_vec, sift_count,
                            min_num_support_abs);
 
-  return VecToArray1D(std::move(to_delete));
+  return py::make_tuple(VecToArray1D(std::move(result.first)),
+                        std::move(result.second));
 }

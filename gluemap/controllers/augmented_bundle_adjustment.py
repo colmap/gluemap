@@ -101,11 +101,12 @@ def select_tracks_from_merged(
     reconstruction: pycolmap.Reconstruction,
     sift_count: dict[int, int],
     min_num_support_abs: int = 512,
-) -> None:
+) -> dict[tuple[int, int], int]:
     """
     Selectively prune non-SIFT tracks from a merged reconstruction.
     Extracts track data as numpy arrays, delegates hot loops to C++ in pygluemap,
-    then applies deletions via pycolmap.
+    then applies deletions via pycolmap. Returns the image-pair coverage map
+    {(img_low, img_high): count} from after selection, for downstream use.
     """
     point3d_ids = []
     track_img_ids = []
@@ -126,7 +127,7 @@ def select_tracks_from_merged(
 
     sc = {int(k): int(v) for k, v in sift_count.items()}
 
-    ids_to_delete = pygluemap.compute_tracks_to_delete(
+    ids_to_delete, pair_count = pygluemap.compute_tracks_to_delete(
         point3d_ids_np,
         track_img_ids_np,
         track_pt2d_idxs_np,
@@ -137,6 +138,8 @@ def select_tracks_from_merged(
 
     for p3d_id in ids_to_delete:
         reconstruction.delete_point3D(int(p3d_id))
+
+    return pair_count
 
 
 def update_poses_from_reconstruction(

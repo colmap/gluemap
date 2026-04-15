@@ -14,7 +14,7 @@ namespace py = pybind11;
 using namespace pybind11::literals;
 
 // Forward declaration from track_selection.cc
-py::array_t<int64_t> ComputeTracksToDeleteWrapper(
+py::tuple ComputeTracksToDeleteWrapper(
     py::array_t<int64_t, py::array::c_style> point3d_ids,
     py::array_t<int64_t, py::array::c_style> track_image_ids,
     py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
@@ -139,6 +139,8 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("point3d_ids"), py::arg("track_image_ids"),
         py::arg("track_pt2d_idxs"), py::arg("track_lengths"),
         py::arg("sift_count"), py::arg("min_num_support_abs") = 512,
-        "Classify and select tracks. Returns int64 array of point3D IDs to "
-        "delete.");
+        "Classify and select tracks. Returns (ids_to_delete, pair_count) where "
+        "ids_to_delete is an int64 array of point3D IDs to delete and "
+        "pair_count is a dict mapping (img_low, img_high) tuples to coverage "
+        "counts after selection.");
 }
