@@ -584,85 +584,111 @@ def initialize_world_points(
 
 
 def filter_observations_by_error(
-    points3D: dict[int, pycolmap.Point3D],
+    reconstruction: pycolmap.Reconstruction,
     errors_per_track: dict[int, list[tuple[int, int, float]]],
     reproj_threshold: float,
     min_track_length: int,
-) -> tuple[dict[int, pycolmap.Point3D], int, int]:
+) -> tuple[int, int]:
     """
-    Filter observations with high reprojection errors from tracks.
+    Filter observations with high reprojection errors from a reconstruction.
+
+    Uses pycolmap's reference-aware deletion methods
+    (``Reconstruction.delete_point3D`` / ``Reconstruction.delete_observation``)
+    so that ``image.points2D[i].point3D_id`` references are cleared alongside
+    track elements. This keeps the reconstruction valid for downstream
+    consumers that call ``Reconstruction.IsValid()`` (e.g. pycolmap's built-in
+    ceres bundle adjuster).
 
     Args:
-        points3D: Dictionary of Point3D objects (will be modified in place)
-        errors_per_track: Reprojection errors from compute_all_errors_from_reconstruction
-        reproj_threshold: Maximum allowed reprojection error (pixels)
-        min_track_length: Minimum observations to keep a track
+        reconstruction: pycolmap.Reconstruction (modified in place).
+        errors_per_track: Reprojection errors from
+            ``compute_all_errors_from_reconstruction``.
+        reproj_threshold: Maximum allowed reprojection error.
+        min_track_length: Minimum observations to keep a track; tracks with
+            fewer surviving inliers are deleted wholesale.
 
     Returns:
-        Tuple of:
-            - filtered_points3D: Updated dictionary with outliers removed
-            - num_observations_removed: Count of removed observations
-            - num_tracks_removed: Count of removed tracks
+        (num_observations_removed, num_tracks_removed).
     """
     num_observations_removed = 0
-    tracks_to_remove = []
+    num_tracks_removed = 0
 
     for point3D_id, track_errors in errors_per_track.items():
-        if point3D_id not in points3D:
+        if point3D_id not in reconstruction.points3D:
             continue
 
-        point3D = points3D[point3D_id]
+        point3D = reconstruction.points3D[point3D_id]
         elements = list(point3D.track.elements)
 
-        # Build new track with only inlier observations
-        new_track = pycolmap.Track()
+        outlier_obs = []  # (image_id, pt_idx) pairs to delete individually
         inlier_count = 0
 
         for (image_id, pt_idx, error), elem in zip(track_errors, elements):
             if error < reproj_threshold:
-                new_track.add_element(elem.image_id, elem.point2D_idx)
                 inlier_count += 1
             else:
+                outlier_obs.append((elem.image_id, elem.point2D_idx))
+
+        if inlier_count < min_track_length:
+            # Not enough inliers to keep the track at all.
+            reconstruction.delete_point3D(point3D_id)
+            num_observations_removed += len(elements)
+            num_tracks_removed += 1
+        else:
+            for image_id, pt_idx in outlier_obs:
+                if point3D_id not in reconstruction.points3D:
+                    # delete_observation auto-deletes the point3D when the
+                    # track would drop below 2 elements; stop once that
+                    # happens.
+                    num_tracks_removed += 1
+                    break
+                reconstruction.delete_observation(image_id, pt_idx)
                 num_observations_removed += 1
 
-        # Keep track only if enough observations remain
-        if inlier_count >= min_track_length:
-            point3D.track = new_track
-        else:
-            tracks_to_remove.append(point3D_id)
-
-    # Remove tracks with too few observations
-    num_tracks_removed = len(tracks_to_remove)
-    for point3D_id in tracks_to_remove:
-        del points3D[point3D_id]
-
-    return points3D, num_observations_removed, num_tracks_removed
+    return num_observations_removed, num_tracks_removed
 
 
 def iterative_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
+    virtual_reconstruction: pycolmap.Reconstruction | None,
     negative_depth_observations: dict[int, set],
     virtual_point_start: dict[int, int],
     options: IterativeBAOptions = None,
     fisheye_intrinsics_params=None,
-) -> pycolmap.Reconstruction:
+) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None]:
     """
     Run iterative bundle adjustment with reprojection error filtering.
 
-    Main entry point for the iterative BA controller. Accepts a pycolmap.Reconstruction
-    and runs multiple rounds of BA + filtering until convergence.
+    Main entry point for the iterative BA controller. Runs multiple rounds of
+    BA + filtering until convergence over a paired (real, virtual) reconstruction.
 
     Args:
-        reconstruction: pycolmap.Reconstruction with cameras, images, and points3D
-        negative_depth_observations: Dict[image_id, Set[point2D_idx]] for negative depth
-        virtual_point_start: Dict[image_id, int] - where virtual points start per image
-        options: BA options (uses defaults if None)
+        reconstruction: pycolmap.Reconstruction with the real tracks and the
+            authoritative poses/intrinsics. Optimized in-place.
+        virtual_reconstruction: pycolmap.Reconstruction holding virtual tracks
+            whose xyz values are jointly optimized in-place, or ``None`` for a
+            pure real BA.
+        negative_depth_observations: Dict[image_id, Set[point2D_idx]] for
+            negative depth observations.
+        virtual_point_start: Dict[image_id, int] - where virtual points start
+            per image. Still consumed by compute_all_errors_from_reconstruction
+            on the virtual reconstruction (whose points2D retain the combined
+            indexing).
+        options: BA options (uses defaults if None).
+        fisheye_intrinsics_params: Optional List[np.ndarray] indexed by
+            camera_id giving fixed fisheye intrinsics to use for virtual
+            residuals.
 
     Returns:
-        reconstruction: Modified in-place and returned
+        (reconstruction, virtual_reconstruction) -- both modified in-place.
     """
     if options is None:
         options = IterativeBAOptions()
+
+    if options.fix_rotations_first_pass:
+        logger.warning(
+            "fix_rotations_first_pass is no longer supported with pycolmap-based BA; ignoring."
+        )
 
     # Build fisheye pycolmap.Camera objects for error computation on virtual points
     fisheye_cameras = None
@@ -682,7 +708,8 @@ def iterative_bundle_adjustment(
                 )
 
     logger.info(
-        f"Starting iterative BA with {len(reconstruction.points3D)} tracks"
+        f"Starting iterative BA with {len(reconstruction.points3D)} real tracks, "
+        f"{len(virtual_reconstruction.points3D) if virtual_reconstruction is not None else 0} virtual tracks"
     )
     logger.info(f"  Max filter iterations: {options.max_filter_iterations}")
     logger.info(
@@ -690,11 +717,22 @@ def iterative_bundle_adjustment(
     )
     logger.info(f"  Min track length: {options.min_track_length}")
 
-    # Count initial observations
-    total_observations = sum(
-        len(list(p.track.elements)) for p in reconstruction.points3D.values()
-    )
-    logger.info(f"Initial observations: {total_observations}")
+    def _count_observations():
+        real_obs = sum(
+            len(list(p.track.elements)) for p in reconstruction.points3D.values()
+        )
+        virt_obs = (
+            sum(
+                len(list(p.track.elements))
+                for p in virtual_reconstruction.points3D.values()
+            )
+            if virtual_reconstruction is not None
+            else 0
+        )
+        return real_obs, virt_obs
+
+    real_obs, virt_obs = _count_observations()
+    logger.info(f"Initial observations: real={real_obs}, virtual={virt_obs}")
 
     # Iterative filtering loop (outer loop runs BA, inner loop tightens threshold)
     iteration = 0
@@ -706,18 +744,18 @@ def iterative_bundle_adjustment(
         logger.info(
             f"=== Iteration {iteration + 1}/{options.max_filter_iterations} ==="
         )
-        logger.info(f"Tracks: {len(reconstruction.points3D)}")
+        logger.info(
+            f"Tracks: real={len(reconstruction.points3D)}, "
+            f"virtual={len(virtual_reconstruction.points3D) if virtual_reconstruction is not None else 0}"
+        )
         logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
         # Run BA via bundle_adjustment
-        # Only fix rotations in first pass on first iteration
-        fix_rot = options.fix_rotations_first_pass and iteration == 0
-        reconstruction = bundle_adjustment(
+        reconstruction, virtual_reconstruction = bundle_adjustment(
             reconstruction,
+            virtual_reconstruction,
             negative_depth_observations,
-            virtual_point_start,
             max_num_iterations=options.max_ba_iterations,
-            fix_rotations_first_pass=fix_rot,
             fisheye_intrinsics_params=fisheye_intrinsics_params,
         )
 
@@ -731,19 +769,30 @@ def iterative_bundle_adjustment(
             scaling = max(3 - iteration, 1)
             current_threshold = scaling * options.normalized_reproj_threshold
 
-            # Compute reprojection errors (normalized) from reconstruction
-            errors_per_track = compute_all_errors_from_reconstruction(
+            # Compute reprojection errors (normalized) on each reconstruction
+            errors_real = compute_all_errors_from_reconstruction(
                 reconstruction,
                 ReprojectionErrorType.NORMALIZED,
                 negative_depth_observations,
                 virtual_point_start=virtual_point_start,
-                fisheye_cameras=fisheye_cameras,
+                fisheye_cameras=None,
+            )
+            errors_virtual = (
+                compute_all_errors_from_reconstruction(
+                    virtual_reconstruction,
+                    ReprojectionErrorType.NORMALIZED,
+                    negative_depth_observations,
+                    virtual_point_start=virtual_point_start,
+                    fisheye_cameras=fisheye_cameras,
+                )
+                if virtual_reconstruction is not None
+                else {}
             )
 
             # Print error statistics before filtering
             all_errors = [
                 e
-                for errs in errors_per_track.values()
+                for errs in list(errors_real.values()) + list(errors_virtual.values())
                 for _, _, e in errs
                 if e < float("inf")
             ]
@@ -758,34 +807,36 @@ def iterative_bundle_adjustment(
                     f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%"
                 )
 
-            # Filter observations with high errors
-            # Note: filter_observations_by_error modifies reconstruction.points3D in-place
-            points3D_dict = dict(reconstruction.points3D)
-            points3D_dict, obs_removed, tracks_removed = (
-                filter_observations_by_error(
-                    points3D_dict,
-                    errors_per_track,
+            # Filter observations with high errors on each reconstruction independently
+            obs_removed_total = 0
+            tracks_removed_total = 0
+            for recon, errs in (
+                (reconstruction, errors_real),
+                (virtual_reconstruction, errors_virtual),
+            ):
+                if recon is None or not errs:
+                    continue
+                obs_removed, tracks_removed = filter_observations_by_error(
+                    recon,
+                    errs,
                     current_threshold,
                     options.min_track_length,
                 )
-            )
-            # Update reconstruction points3D (remove filtered tracks)
-            for point3D_id in list(reconstruction.points3D.keys()):
-                if point3D_id not in points3D_dict:
-                    del reconstruction.points3D[point3D_id]
-                else:
-                    reconstruction.points3D[point3D_id] = points3D_dict[
-                        point3D_id
-                    ]
+                obs_removed_total += obs_removed
+                tracks_removed_total += tracks_removed
 
-            total_filtered += obs_removed
+            total_filtered += obs_removed_total
 
             logger.info(
-                f"Filtered: {obs_removed} observations, {tracks_removed} tracks removed"
+                f"Filtered: {obs_removed_total} observations, {tracks_removed_total} tracks removed"
             )
 
-            # Check if enough tracks were filtered (> 0.1% of points)
-            num_points = len(reconstruction.points3D)
+            # Check if enough tracks were filtered (> convergence_threshold of combined points)
+            num_points = len(reconstruction.points3D) + (
+                len(virtual_reconstruction.points3D)
+                if virtual_reconstruction is not None
+                else 0
+            )
             if (
                 num_points > 0
                 and total_filtered > options.convergence_threshold * num_points
@@ -807,16 +858,10 @@ def iterative_bundle_adjustment(
             logger.info("Max iterations reached, stopping")
             break
 
-        total_observations = sum(
-            len(list(p.track.elements))
-            for p in reconstruction.points3D.values()
-        )
-
-    total_observations = sum(
-        len(list(p.track.elements)) for p in reconstruction.points3D.values()
-    )
+    real_obs, virt_obs = _count_observations()
     logger.info(
-        f"Final: {len(reconstruction.points3D)} tracks, {total_observations} observations"
+        f"Final: {len(reconstruction.points3D)} real tracks ({real_obs} obs), "
+        f"{len(virtual_reconstruction.points3D) if virtual_reconstruction is not None else 0} virtual tracks ({virt_obs} obs)"
     )
 
-    return reconstruction
+    return reconstruction, virtual_reconstruction

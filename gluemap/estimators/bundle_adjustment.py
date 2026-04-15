@@ -8,319 +8,237 @@ import pygluemap
 logger = logging.getLogger(__name__)
 
 
-def add_reprojection_error(
-    prob,
-    costs,
-    losses,
-    reconstruction,
+def add_virtual_track_residuals(
+    problem,
+    virtual_reconstruction: pycolmap.Reconstruction | None,
+    reference_reconstruction: pycolmap.Reconstruction,
     negative_depth_observations,
-    virtual_point_start,
     fisheye_intrinsics_params=None,
 ):
     """
-    Add reprojection error for all tracks in reconstruction.points3D.
+    Add reprojection residuals for virtual tracks to an existing ceres problem.
 
-    Reads poses, intrinsics, and keypoints directly from the reconstruction.
-    Caches numpy array references for pointer consistency with Ceres.
+    Pose and intrinsic parameter blocks are resolved through
+    ``reference_reconstruction`` (the real reconstruction handed to
+    ``pycolmap.create_default_ceres_bundle_adjuster``) so that their numpy
+    buffers are the same ones pycolmap is already optimizing -- the virtual
+    residuals thus contribute to the same parameter blocks rather than
+    detached copies.
 
-    Returns:
-        first_camera_id: The ID of the first camera added to the problem (for gauge fixing)
+    Virtual points3D are read from ``virtual_reconstruction``; their xyz
+    arrays become new parameter blocks in ``problem`` via the residual block.
+
+    Arctan loss is always used for virtual points. If
+    ``fisheye_intrinsics_params`` is supplied, virtual residuals are built
+    against a SIMPLE_FISHEYE camera model using the (fixed) fisheye params,
+    mirroring the previous behaviour at the disabled
+    ``create_fisheye_cameras_and_rectify`` call site.
     """
-    points3D = reconstruction.points3D
-    if points3D is None:
-        return None
-
-    if len(reconstruction.cameras) == 0:
-        logger.warning("No cameras in reconstruction")
-        return None
+    if virtual_reconstruction is None or len(virtual_reconstruction.points3D) == 0:
+        return
 
     fisheye_model_id = pycolmap.CameraModelId.SIMPLE_FISHEYE
-
-    num_constraints = 0
-    num_skipped = 0
-    num_virtual = 0
-    first_camera_id = None
-
-    loss_huber = pyceres.LossFunction(
-        {"name": "huber", "params": [1.0], "magnitude": 1.0}
-    )
     loss_arctan = pyceres.LossFunction(
         {"name": "arctan", "params": [5.0], "magnitude": 1.0}
     )
-    # Step 5: Add reprojection error for each track observation
+
+    num_constraints = 0
+    num_negative = 0
+    num_skipped = 0
     num_none = 0
-    isnegative_count = 0
-    for point3D_id, point3D in points3D.items():
-        # Get world point from points3D.xyz (set by initialize_world_points)
+    fixed_fisheye_blocks = set()
+
+    for point3D in virtual_reconstruction.points3D.values():
         world_point = point3D.xyz
         if world_point is None or np.all(world_point == 0):
             num_none += 1
             continue
-        elements = list(point3D.track.elements)
 
-        for elem in elements:
+        for elem in point3D.track.elements:
             image_id, pt_idx = elem.image_id, elem.point2D_idx
 
-            if image_id not in reconstruction.images:
+            if image_id not in reference_reconstruction.images:
+                num_skipped += 1
+                continue
+            if image_id not in virtual_reconstruction.images:
                 num_skipped += 1
                 continue
 
-            image = reconstruction.images[image_id]
+            image = virtual_reconstruction.images[image_id]
+            if pt_idx >= len(image.points2D):
+                num_skipped += 1
+                continue
             point2D = image.points2D[pt_idx].xy
-            camera_id = image.camera_id
 
-            # rig_from_world.params is a mutable numpy view into the C++ Rigid3d
-            cam_pose = reconstruction.frames[image_id].rig_from_world.params
-            # camera.params is a mutable numpy view into the C++ Camera
-            camera_params = reconstruction.cameras[camera_id].params
+            camera_id = reference_reconstruction.images[image_id].camera_id
 
-            # Determine if this is a virtual point
-            vp_start = virtual_point_start.get(image_id, len(image.points2D))
-            is_virtual_point = pt_idx >= vp_start
-
-            # Virtual points use duplicate SIMPLE_FISHEYE camera (fixed params)
-            if is_virtual_point and fisheye_intrinsics_params is not None:
+            # Pose & intrinsics come from the reference reconstruction so the
+            # underlying numpy buffers are shared with pycolmap's residuals.
+            cam_pose = reference_reconstruction.frames[image_id].rig_from_world.params
+            if (
+                fisheye_intrinsics_params is not None
+                and camera_id < len(fisheye_intrinsics_params)
+                and fisheye_intrinsics_params[camera_id] is not None
+            ):
                 camera_params = fisheye_intrinsics_params[camera_id]
                 active_model_id = fisheye_model_id
             else:
-                active_model_id = reconstruction.cameras[camera_id].model
+                camera_params = reference_reconstruction.cameras[camera_id].params
+                active_model_id = reference_reconstruction.cameras[camera_id].model
 
-            # Determine if this observation has negative depth
-            is_negative_depth = (
+            is_negative = (
                 image_id in negative_depth_observations
                 and pt_idx in negative_depth_observations[image_id]
             )
-
-            # Choose cost function based on negative depth flag
-            if is_negative_depth:
+            if is_negative:
                 cost = pygluemap.ReprojErrorCostWithNegativeDepth(
                     active_model_id, point2D
                 )
-                isnegative_count += 1
+                num_negative += 1
             else:
                 cost = pygluemap.ReprojErrorCost(active_model_id, point2D)
 
-            # Choose loss function: Arctan for virtual points, Huber for real points
-            if is_virtual_point:
-                loss = loss_arctan
-                num_virtual += 1
-            else:
-                loss = loss_huber
-
-            prob.add_residual_block(
+            problem.add_residual_block(
                 cost,
-                loss,
+                loss_arctan,
                 [world_point, cam_pose, camera_params],
             )
-
-            # Track first camera added to problem
-            if first_camera_id is None:
-                first_camera_id = image_id
-
-            costs.append(cost)
             num_constraints += 1
 
+            # Fisheye intrinsics are fixed (not optimized).
+            if (
+                fisheye_intrinsics_params is not None
+                and active_model_id == fisheye_model_id
+                and id(camera_params) not in fixed_fisheye_blocks
+                and problem.has_parameter_block(camera_params)
+            ):
+                problem.set_parameter_block_constant(camera_params)
+                fixed_fisheye_blocks.add(id(camera_params))
+
     logger.info(
-        f"Added {num_constraints} reprojection error constraints ({num_virtual} virtual)"
+        f"Added {num_constraints} virtual reprojection constraints "
+        f"({num_negative} with negative depth, "
+        f"{num_skipped} skipped, {num_none} with no xyz)"
     )
-    logger.info(f"Skipped {num_skipped} observations")
-    logger.info(f"Number of None camera parameters skipped: {num_none}")
-    logger.info(f"Number of negative observation: {isnegative_count}")
-
-    return first_camera_id
 
 
-# TODO: leverage pycolmap's built-in CeresBundleAdjuster, and feed in with two reconstruction
-# One with real tracks, and one with virtual tracks.
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
+    virtual_reconstruction: pycolmap.Reconstruction | None,
     negative_depth_observations,
-    virtual_point_start,
     max_num_iterations: int = 200,
-    fix_rotations_first_pass: bool = False,
     fisheye_intrinsics_params=None,
-) -> pycolmap.Reconstruction:
+) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None]:
     """
-    Bundle adjustment with reprojection error on pycolmap.Reconstruction.
+    Bundle adjustment over real + virtual reconstructions.
 
-    Optimizes reconstruction.frames[].rig_from_world.params and
-    reconstruction.cameras[].params directly in-place via Ceres.
+    The real reconstruction is optimized via pycolmap's built-in ceres
+    bundle adjuster (handles manifolds, gauge fixing, solver selection,
+    and default Huber loss). Virtual residuals are appended manually to
+    the same ceres problem via ``add_virtual_track_residuals`` so that
+    they share the pose/intrinsic parameter blocks with the real residuals
+    but use Arctan loss (and optionally a fixed SIMPLE_FISHEYE camera
+    model with the provided ``fisheye_intrinsics_params``).
 
     Args:
-        reconstruction: pycolmap.Reconstruction with cameras, images, points3D
-        negative_depth_observations: Dict[image_id, Set[point2D_idx]] for observations
-            that have negative depth (use ReprojErrorCostWithNegativeDepth)
-        virtual_point_start: Dict[image_id, int] indicating where virtual points
-            start in each image's points2D list. Points before this index are
-            real (use Huber loss), points at/after are virtual (use Arctan loss).
-        max_num_iterations: Max Ceres iterations
-        fix_rotations_first_pass: Fix rotations in first pass to let translations settle
+        reconstruction: pycolmap.Reconstruction holding the real tracks
+            plus authoritative poses and intrinsics. Optimized in-place.
+        virtual_reconstruction: pycolmap.Reconstruction whose points3D
+            are virtual; may be None or empty for a pure real BA. Its
+            points3D.xyz values are optimized in-place as part of the
+            joint solve.
+        negative_depth_observations: Dict[image_id, Set[point2D_idx]]
+            marking observations that should use the negative-depth cost.
+        max_num_iterations: Max Ceres iterations.
+        fisheye_intrinsics_params: Optional List[np.ndarray] indexed by
+            camera_id giving fixed fisheye intrinsics; when present,
+            virtual residuals use SIMPLE_FISHEYE against these params.
 
     Returns:
-        reconstruction: Modified in-place and returned
+        (reconstruction, virtual_reconstruction) with parameters
+        updated in-place.
     """
-    logger.info("Performing bundle adjustment with reprojection error...")
-    logger.info(f"Bundle adjustment with {len(reconstruction.points3D)} tracks")
-
-    # Build problem and add residuals (reads directly from reconstruction)
-    prob = pyceres.Problem()
-    costs = []
-    losses = []
-
-    first_camera_id = add_reprojection_error(
-        prob,
-        costs,
-        losses,
-        reconstruction,
-        negative_depth_observations=negative_depth_observations,
-        virtual_point_start=virtual_point_start,
-        fisheye_intrinsics_params=fisheye_intrinsics_params,
+    logger.info(
+        f"Bundle adjustment: {len(reconstruction.points3D)} real tracks, "
+        f"{len(virtual_reconstruction.points3D) if virtual_reconstruction is not None else 0} virtual tracks"
     )
 
-    # Set manifolds
-    # Use product manifold for 7D pose: quaternion (4D, 3D tangent) + translation (3D, 3D tangent)
+    # --- Build pycolmap BA over the real reconstruction --------------------
+    ba_options = pycolmap.BundleAdjustmentOptions()
+    ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
+    # Disable Schur auto-selection: the linear_solver_ordering that pycolmap
+    # builds in ``create_solver_options`` does not match the parameter blocks
+    # in the pyceres ``Problem`` (observed vertices.size() != ordering->size()),
+    # which trips a Ceres DCHECK and aborts the solve. This is a pyceres /
+    # pycolmap handoff issue, independent of virtual tracks. Fall back to
+    # SPARSE_NORMAL_CHOLESKY which does not require a custom ordering
+    # (matches the previous hand-rolled solver config).
+    # TODO: fix the underlying issue and re-enable auto-selection (which picks a more efficient sparse schur solver for typical BA problems).
+    ba_options.ceres.auto_select_solver_type = False
+    ba_options.ceres.solver_options.linear_solver_type = (
+        pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+    )
+    # Wrap real-track reprojection residuals in a Huber loss (matches the
+    # hand-rolled solver's prior behaviour). loss_function_scale stays at its
+    # default 1.0 which reproduces the previous Huber[1.0] magnitude=1.0.
+    ba_options.ceres.loss_function_type = pycolmap.LossFunctionType.HUBER
+
+    ba_config = pycolmap.BundleAdjustmentConfig()
     for image_id in reconstruction.images:
-        pose_params = reconstruction.frames[image_id].rig_from_world.params
-        if prob.has_parameter_block(pose_params):
-            pose_manifold = pygluemap.CreatePoseManifold()
-            prob.set_manifold(pose_params, pose_manifold)
+        ba_config.add_image(image_id)
+    for point3D_id in reconstruction.points3D:
+        ba_config.add_variable_point(point3D_id)
+    ba_config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
 
-    for camera_id, camera in reconstruction.cameras.items():
-        params = camera.params
-        if prob.has_parameter_block(params):
-            pp_idxs = list(camera.principal_point_idxs())
-            prob.set_manifold(
-                params, pyceres.SubsetManifold(len(params), pp_idxs)
-            )
-
-    # Fix fisheye camera params (not optimized)
-    if fisheye_intrinsics_params is not None:
-        for params in fisheye_intrinsics_params:
-            if params is not None and prob.has_parameter_block(params):
-                prob.set_parameter_block_constant(params)
-
-    # Fix gauge freedom
-    if first_camera_id is not None:
-        # Fix both rotation and translation of first camera
-        first_pose = reconstruction.frames[
-            first_camera_id
-        ].rig_from_world.params
-        if prob.has_parameter_block(first_pose):
-            prob.set_parameter_block_constant(first_pose)
-            logger.info(
-                f"Fixed rotation and translation gauge: camera {first_camera_id}"
-            )
-
-        # Fix scale: pin the largest translation component of a second camera
-        second_camera_id = None
-        for image_id in reconstruction.images:
-            if image_id != first_camera_id:
-                pose_params = reconstruction.frames[
-                    image_id
-                ].rig_from_world.params
-                if prob.has_parameter_block(pose_params):
-                    second_camera_id = image_id
-                    break
-        if second_camera_id is not None:
-            # Get translation part of the pose (indices 4-6)
-            second_pose = reconstruction.frames[
-                second_camera_id
-            ].rig_from_world.params
-            t2 = second_pose[4:]
-            fixed_idx = int(np.argmax(np.abs(t2)))
-            # Create product manifold: full quaternion manifold + subset translation manifold
-            scale_gauge_manifold = (
-                pygluemap.CreatePoseManifoldWithFixedTransComponent(fixed_idx)
-            )
-            prob.set_manifold(second_pose, scale_gauge_manifold)
-            logger.info(
-                f"Fixed scale gauge: camera {second_camera_id}, translation component {fixed_idx}"
-            )
-        else:
-            logger.warning("No second camera available to fix scale gauge")
-    else:
-        logger.warning("No cameras added to problem, cannot fix gauge")
-
-    # Solve (solver config matching COLMAP's bundle_adjustment_ceres.cc)
-    options = pyceres.SolverOptions()
-    options.max_num_iterations = max_num_iterations
-    options.max_num_consecutive_invalid_steps = 10
-    options.minimizer_progress_to_stdout = prob.num_residuals() > 5_000_000
-
-    # Use SPARSE_NORMAL_CHOLESKY to avoid Schur ordering issues with custom manifolds
-    num_images = len(reconstruction.images)
-    options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
-
-    # TODO: SPARSE_SCHUR / DENSE_SCHUR somehow gives error.
-    # Need to debug this.
-    # if num_images <= 200:
-    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
-    #     # options.linear_solver_type = pyceres.LinearSolverType.DENSE_SCHUR
-    # elif num_images <= 1000:
-    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
-    # else:
-    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
-
-    # Adaptive threading based on problem size (matching COLMAP)
-    if prob.num_residuals() < 50000:
-        options.num_threads = 1
-    else:
-        options.num_threads = 32
+    bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
+        ba_options, ba_config, reconstruction
+    )
+    problem = bundle_adjuster.problem
 
     logger.info(
-        f"Solver: {options.linear_solver_type.name} ({num_images} images, "
-        f"{prob.num_residuals()} residuals)"
+        f"After pycolmap BA construction: "
+        f"{problem.num_residual_blocks()} residual blocks, "
+        f"{problem.num_parameter_blocks()} parameter blocks, "
+        f"{problem.num_residuals()} residuals"
     )
 
-    logger.info("Solving the optimization problem...")
+    # # --- Append virtual residuals to the same problem ----------------------
+    # add_virtual_track_residuals(
+    #     problem,
+    #     virtual_reconstruction=virtual_reconstruction,
+    #     reference_reconstruction=reconstruction,
+    #     negative_depth_observations=negative_depth_observations,
+    #     fisheye_intrinsics_params=fisheye_intrinsics_params,
+    # )
 
-    if fix_rotations_first_pass:
-        # First pass: Fix quaternion part of all poses (except gauge-fixed camera)
-        # Create manifold that fixes rotation (quaternion) but allows translation
-        for image_id in reconstruction.images:
-            if image_id != first_camera_id:
-                pose_params = reconstruction.frames[
-                    image_id
-                ].rig_from_world.params
-                if prob.has_parameter_block(pose_params):
-                    translation_only_manifold = (
-                        pygluemap.CreateTranslationOnlyManifold()
-                    )
-                    prob.set_manifold(pose_params, translation_only_manifold)
+    logger.info(
+        f"After virtual residual add: "
+        f"{problem.num_residual_blocks()} residual blocks, "
+        f"{problem.num_parameter_blocks()} parameter blocks, "
+        f"{problem.num_residuals()} residuals"
+    )
 
-        summary = pyceres.SolverSummary()
-        pyceres.solve(options, prob, summary)
-        # pygluemap.solve_cuda(options, prob, summary)
-        logger.info(summary.BriefReport())
-
-        # Release rotations for second pass - restore full pose manifold
-        for image_id in reconstruction.images:
-            if image_id != first_camera_id:
-                pose_params = reconstruction.frames[
-                    image_id
-                ].rig_from_world.params
-                if prob.has_parameter_block(pose_params):
-                    # Restore appropriate manifold
-                    if (
-                        image_id == second_camera_id
-                        and second_camera_id is not None
-                    ):
-                        # Restore scale gauge manifold for second camera
-                        t2 = pose_params[4:]
-                        fixed_idx = int(np.argmax(np.abs(t2)))
-                        scale_gauge_manifold = (
-                            pygluemap.CreatePoseManifoldWithFixedTransComponent(
-                                fixed_idx
-                            )
-                        )
-                        prob.set_manifold(pose_params, scale_gauge_manifold)
-                    else:
-                        # Restore standard pose manifold
-                        restored_manifold = pygluemap.CreatePoseManifold()
-                        prob.set_manifold(pose_params, restored_manifold)
-
+    # --- Solve -------------------------------------------------------------
+    solver_options = ba_options.ceres.create_solver_options(
+        ba_config, problem
+    )
     summary = pyceres.SolverSummary()
-    pyceres.solve(options, prob, summary)
+    pyceres.solve(solver_options, problem, summary)
     logger.info(summary.BriefReport())
 
-    return reconstruction
+    # --- Sync poses/intrinsics into the virtual reconstruction -------------
+    # Only the real reconstruction's numpy buffers flowed into the ceres
+    # problem (see ``add_virtual_track_residuals``); the virtual
+    # reconstruction still holds the pre-solve values. Copy optimized
+    # poses and per-camera intrinsics over so downstream consumers
+    # reading from virtual_reconstruction observe consistent state.
+    if virtual_reconstruction is not None:
+        # Lazy import to avoid a circular estimators -> controllers import
+        # at module load time.
+        from gluemap.controllers.augmented_bundle_adjustment import (
+            update_poses_from_reconstruction,
+        )
+
+        update_poses_from_reconstruction(reconstruction, virtual_reconstruction)
+
+    return reconstruction, virtual_reconstruction
