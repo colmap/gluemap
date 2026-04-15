@@ -19,9 +19,8 @@ py::array_t<int64_t> ComputeTracksToDeleteWrapper(
     py::array_t<int64_t, py::array::c_style> track_image_ids,
     py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
     py::array_t<int32_t, py::array::c_style> track_lengths,
-    const std::unordered_map<int64_t, int> &virtual_point_start,
-    const std::unordered_map<int64_t, int> &sift_count, int min_num_support_abs,
-    const std::string &tracks_to_keep);
+    const std::unordered_map<int64_t, int> &sift_count,
+    int min_num_support_abs);
 
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
@@ -139,9 +138,7 @@ PYBIND11_MODULE(pygluemap, m) {
   m.def("compute_tracks_to_delete", &ComputeTracksToDeleteWrapper,
         py::arg("point3d_ids"), py::arg("track_image_ids"),
         py::arg("track_pt2d_idxs"), py::arg("track_lengths"),
-        py::arg("virtual_point_start"), py::arg("sift_count"),
-        py::arg("min_num_support_abs") = 512,
-        py::arg("tracks_to_keep") = "sift",
+        py::arg("sift_count"), py::arg("min_num_support_abs") = 512,
         "Classify and select tracks. Returns int64 array of point3D IDs to "
         "delete.");
 }

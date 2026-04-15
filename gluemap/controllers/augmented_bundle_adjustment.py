@@ -1,8 +1,8 @@
-from copy import deepcopy
 import logging
 import os
 import shutil
 import time
+from copy import deepcopy
 
 import numpy as np
 import pycolmap
@@ -99,13 +99,11 @@ def create_fisheye_cameras_and_rectify(
 
 def select_tracks_from_merged(
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: dict[int, int],
     sift_count: dict[int, int],
     min_num_support_abs: int = 512,
-    tracks_to_keep: str = "sift",
 ) -> None:
     """
-    Selectively prune prior/virtual tracks from a merged reconstruction.
+    Selectively prune non-SIFT tracks from a merged reconstruction.
     Extracts track data as numpy arrays, delegates hot loops to C++ in pygluemap,
     then applies deletions via pycolmap.
     """
@@ -126,7 +124,6 @@ def select_tracks_from_merged(
     track_pt2d_idxs_np = np.array(track_pt2d_idxs, dtype=np.int64)
     track_lengths_np = np.array(track_lengths, dtype=np.int32)
 
-    vps = {int(k): int(v) for k, v in virtual_point_start.items()}
     sc = {int(k): int(v) for k, v in sift_count.items()}
 
     ids_to_delete = pygluemap.compute_tracks_to_delete(
@@ -134,10 +131,8 @@ def select_tracks_from_merged(
         track_img_ids_np,
         track_pt2d_idxs_np,
         track_lengths_np,
-        vps,
         sc,
         min_num_support_abs,
-        tracks_to_keep,
     )
 
     for p3d_id in ids_to_delete:
@@ -158,7 +153,9 @@ def update_poses_from_reconstruction(
     for target_id, target_img in target_recon.images.items():
         if target_img.name in source_by_name:
             src_id, src_img = source_by_name[target_img.name]
-            target_recon.frames[target_id].rig_from_world = src_img.cam_from_world()
+            target_recon.frames[
+                target_id
+            ].rig_from_world = src_img.cam_from_world()
     # Copy camera intrinsics
     for cam_id, cam in source_recon.cameras.items():
         if cam_id in target_recon.cameras:
@@ -188,7 +185,10 @@ def filter_reconstruction_by_angular_error(
     )
 
     all_angular = [
-        e for errs in angular_errors.values() for _, _, e in errs if e < float("inf")
+        e
+        for errs in angular_errors.values()
+        for _, _, e in errs
+        if e < float("inf")
     ]
     if len(all_angular) > 0:
         all_angular_arr = np.array(all_angular)
@@ -214,7 +214,7 @@ def filter_reconstruction_by_angular_error(
         f"{tracks_removed} tracks"
     )
     logger.info(
-        f"  Points3D: {num_points_before} -> " f"{len(reconstruction.points3D)}"
+        f"  Points3D: {num_points_before} -> {len(reconstruction.points3D)}"
     )
 
 
@@ -453,7 +453,9 @@ def run_refinement_pipeline(
         opt_triang.triangulation.merge_max_reproj_error = 15.0
         opt_triang.triangulation.complete_max_reproj_error = 15.0
         opt_triang.triangulation.ignore_two_view_tracks = False
-        opt_triang.triangulation.create_max_angle_error = angular_error_threshold_deg
+        opt_triang.triangulation.create_max_angle_error = (
+            angular_error_threshold_deg
+        )
         opt_triang.ba_global_max_refinements = 0
 
         reconstruction = pycolmap.triangulate_points(
@@ -474,10 +476,8 @@ def run_refinement_pipeline(
 
         select_tracks_from_merged(
             reconstruction=reconstruction,
-            virtual_point_start=virtual_point_start,
             sift_count=sift_count,
             min_num_support_abs=512,
-            tracks_to_keep="sift",
         )
 
         # Step 7b: Create fisheye cameras and rectify virtual 2D points
@@ -503,7 +503,9 @@ def run_refinement_pipeline(
                         pycolmap.ReprojectionErrorType.ANGULAR,  # error_type
                     )
                 )
-                obs_manager.filter_points3D_with_short_tracks(min_track_length=2)
+                obs_manager.filter_points3D_with_short_tracks(
+                    min_track_length=2
+                )
                 logger.info(
                     f"Real reconstruction: pycolmap filter removed "
                     f"{num_filtered} observations, points3D "
@@ -534,10 +536,15 @@ def run_refinement_pipeline(
 
         # Step 7c: Limit number of tracks before BA
         max_num_tracks = getattr(args, "max_num_tracks", None)
-        if max_num_tracks is not None and len(reconstruction.points3D) > max_num_tracks:
+        if (
+            max_num_tracks is not None
+            and len(reconstruction.points3D) > max_num_tracks
+        ):
             sorted_ids = sorted(
                 reconstruction.points3D.keys(),
-                key=lambda pid: len(list(reconstruction.points3D[pid].track.elements)),
+                key=lambda pid: len(
+                    list(reconstruction.points3D[pid].track.elements)
+                ),
                 reverse=True,
             )
             ids_to_remove = sorted_ids[max_num_tracks:]
