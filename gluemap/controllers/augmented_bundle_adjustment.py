@@ -253,54 +253,6 @@ def update_poses_from_reconstruction(
             target_recon.cameras[cam_id].params = cam.params
 
 
-def reindex_reconstruction_for_triangulation(
-    reconstruction: pycolmap.Reconstruction,
-) -> pycolmap.Reconstruction:
-    """
-    Create a copy of the reconstruction with 1-indexed IDs to match the COLMAP database.
-
-    build_reconstruction_for_ba uses 0-indexed IDs, but the database (from
-    prepare_glomap_prior) uses 1-indexed IDs. pycolmap.triangulate_points needs
-    consistent rig assignments between the reconstruction and database, so we
-    re-index before triangulation.
-    """
-    new_recon = pycolmap.Reconstruction()
-
-    old_to_new_cam = {}
-    for cam_id, camera in reconstruction.cameras.items():
-        new_cam_id = cam_id + 1
-        new_cam = pycolmap.Camera(
-            camera_id=new_cam_id,
-            model=camera.model_name,
-            width=camera.width,
-            height=camera.height,
-            params=camera.params,
-        )
-        old_to_new_cam[cam_id] = new_cam_id
-        new_recon.add_camera_with_trivial_rig(new_cam)
-
-    old_to_new_img = {}
-    for img_id, image in reconstruction.images.items():
-        new_img = pycolmap.Image()
-        new_img.image_id = img_id + 1
-        new_img.camera_id = old_to_new_cam[image.camera_id]
-        new_img.name = image.name
-        for pt2d in image.points2D:
-            new_img.points2D.append(pycolmap.Point2D(pt2d.xy))
-        old_to_new_img[img_id] = img_id + 1
-        new_recon.add_image_with_trivial_frame(new_img, image.cam_from_world())
-
-    for p3d_id, point3D in reconstruction.points3D.items():
-        new_track = pycolmap.Track()
-        for elem in point3D.track.elements:
-            new_track.add_element(
-                old_to_new_img[elem.image_id], elem.point2D_idx
-            )
-        new_recon.add_point3D(point3D.xyz, new_track)
-
-    return new_recon
-
-
 def _extract_reconstruction_arrays(recon: pycolmap.Reconstruction):
     """Extract image names/ids/n_pts2d and 3D point data as numpy arrays."""
     names, ids, n_pts2d = [], [], []
@@ -675,6 +627,15 @@ def run_refinement_pipeline(
         pts2d_idx_inv, images_points2d_virtual_isnegative
     )
 
+    # build_reconstruction_for_ba produces a 1-indexed reconstruction; shift
+    # the per-image dicts by +1 so their keys line up with reconstruction image IDs.
+    virtual_point_start = {
+        img_id + 1: v for img_id, v in virtual_point_start.items()
+    }
+    negative_depth_observations = {
+        img_id + 1: s for img_id, s in negative_depth_observations.items()
+    }
+
     database_path = args.curr_path + "/database_merged.db"
     triangulated_output_path = args.curr_path + "/coarse_triangulated"
 
@@ -721,11 +682,8 @@ def run_refinement_pipeline(
         )
         opt_triang.ba_global_max_refinements = 0
 
-        reindexed_reconstruction = reindex_reconstruction_for_triangulation(
-            reconstruction
-        )
         triangulated_reconstruction = pycolmap.triangulate_points(
-            reindexed_reconstruction,
+            reconstruction,
             database_path,
             ".",  # skip color extraction
             triangulated_output_path,
