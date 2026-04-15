@@ -6,7 +6,6 @@
 #include "cost_functions.h"
 
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <ceres/ceres.h>
@@ -23,27 +22,6 @@ py::array_t<int64_t> ComputeTracksToDeleteWrapper(
     const std::unordered_map<int64_t, int> &virtual_point_start,
     const std::unordered_map<int64_t, int> &sift_count, int min_num_support_abs,
     const std::string &tracks_to_keep);
-
-// Forward declaration from merge_reconstruction.cc
-py::dict ComputeMergeDataWrapper(
-    const std::vector<std::string> &tri_names,
-    py::array_t<int64_t, py::array::c_style> tri_ids,
-    py::array_t<int32_t, py::array::c_style> tri_n_pts2d,
-    const std::vector<std::string> &recon_names,
-    py::array_t<int64_t, py::array::c_style> recon_ids,
-    py::array_t<int32_t, py::array::c_style> recon_n_pts2d,
-    py::array_t<double, py::array::c_style> recon_xyz,
-    py::array_t<int64_t, py::array::c_style> recon_track_img_ids,
-    py::array_t<int32_t, py::array::c_style> recon_track_pt2d_idxs,
-    py::array_t<int32_t, py::array::c_style> recon_track_lens,
-    py::array_t<double, py::array::c_style> tri_xyz,
-    py::array_t<int64_t, py::array::c_style> tri_track_img_ids,
-    py::array_t<int32_t, py::array::c_style> tri_track_pt2d_idxs,
-    py::array_t<int32_t, py::array::c_style> tri_track_lens,
-    std::unordered_map<int64_t, int> virtual_point_start,
-    std::unordered_map<int64_t, std::unordered_set<int>>
-        negative_depth_observations,
-    bool triangulated_features_first);
 
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
@@ -155,22 +133,6 @@ PYBIND11_MODULE(pygluemap, m) {
 
   m.def("is_cuda_available", &IsCUDAAvailable,
         "Returns True if the module was compiled with CUDA support.");
-
-  // Numpy-based merge: returns a dict with merged 3D point arrays and updated
-  // dicts. Python builds the pycolmap.Reconstruction from the returned data.
-  m.def("compute_merge_data", &ComputeMergeDataWrapper, py::arg("tri_names"),
-        py::arg("tri_ids"), py::arg("tri_n_pts2d"), py::arg("recon_names"),
-        py::arg("recon_ids"), py::arg("recon_n_pts2d"), py::arg("recon_xyz"),
-        py::arg("recon_track_img_ids"), py::arg("recon_track_pt2d_idxs"),
-        py::arg("recon_track_lens"), py::arg("tri_xyz"),
-        py::arg("tri_track_img_ids"), py::arg("tri_track_pt2d_idxs"),
-        py::arg("tri_track_lens"), py::arg("virtual_point_start"),
-        py::arg("negative_depth_observations"),
-        py::arg("triangulated_features_first") = true,
-        "Compute merged 3D point data and updated index dicts. "
-        "Returns dict with merged_xyz, merged_track_*, recon_offsets, "
-        "tri_to_recon_id, tri_offsets, virtual_point_start, "
-        "negative_depth_observations.");
 
   // Numpy-based track selection: returns point3D IDs to delete.
   // Python then calls reconstruction.delete_point3d(id) for each.

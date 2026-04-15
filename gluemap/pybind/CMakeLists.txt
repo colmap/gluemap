@@ -22,7 +22,7 @@ find_package(Ceres REQUIRED)
 find_package(Boost REQUIRED)
 find_package(OpenMP REQUIRED)
 
-pybind11_add_module(pygluemap MODULE "bindings.cc" "track_selection.cc" "merge_reconstruction.cc")
+pybind11_add_module(pygluemap MODULE "bindings.cc" "track_selection.cc")
 
 target_include_directories(pygluemap PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
