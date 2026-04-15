@@ -165,7 +165,10 @@ def bundle_adjustment(
 
     # --- Build pycolmap BA over the real reconstruction --------------------
     ba_options = pycolmap.BundleAdjustmentOptions()
+    # Restore stock Ceres convergence tolerances.
+    ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
+    
     # Disable Schur auto-selection: the linear_solver_ordering that pycolmap
     # builds in ``create_solver_options`` does not match the parameter blocks
     # in the pyceres ``Problem`` (observed vertices.size() != ordering->size()),
@@ -202,14 +205,14 @@ def bundle_adjustment(
         f"{problem.num_residuals()} residuals"
     )
 
-    # # --- Append virtual residuals to the same problem ----------------------
-    # add_virtual_track_residuals(
-    #     problem,
-    #     virtual_reconstruction=virtual_reconstruction,
-    #     reference_reconstruction=reconstruction,
-    #     negative_depth_observations=negative_depth_observations,
-    #     fisheye_intrinsics_params=fisheye_intrinsics_params,
-    # )
+    # --- Append virtual residuals to the same problem ----------------------
+    add_virtual_track_residuals(
+        problem,
+        virtual_reconstruction=virtual_reconstruction,
+        reference_reconstruction=reconstruction,
+        negative_depth_observations=negative_depth_observations,
+        fisheye_intrinsics_params=fisheye_intrinsics_params,
+    )
 
     logger.info(
         f"After virtual residual add: "
