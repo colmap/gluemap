@@ -221,6 +221,33 @@ def filter_reconstruction_by_angular_error(
     )
 
 
+def filter_reconstruction_by_angular_error_colmap(
+    reconstruction: pycolmap.Reconstruction,
+    angular_error_threshold_deg: float,
+):
+    """Filter the reconstruction in place using pycolmap's built-in
+    ObservationManager angular reprojection error filter."""
+    logger.info(
+        f"Filtering reconstruction by angular error via pycolmap "
+        f"(threshold={angular_error_threshold_deg} deg)..."
+    )
+    num_points_before = len(reconstruction.points3D)
+    obs_manager = pycolmap.ObservationManager(reconstruction)
+    points3d_ids = {pid for pid, _ in reconstruction.points3D.items()}
+    num_filtered = (
+        obs_manager.filter_points3D_with_large_reprojection_error(
+            angular_error_threshold_deg,
+            points3d_ids,
+            pycolmap.ReprojectionErrorType.ANGULAR,
+        )
+    )
+    obs_manager.filter_points3D_with_short_tracks(min_track_length=2)
+    logger.info(
+        f"  pycolmap filter removed {num_filtered} observations, "
+        f"points3D {num_points_before} -> {len(reconstruction.points3D)}"
+    )
+
+
 def run_refinement_pipeline(
     args,
     predictions_dict: dict,
@@ -496,23 +523,9 @@ def run_refinement_pipeline(
             # Real reconstruction: try pycolmap's built-in observation filter,
             # fall back to filter_reconstruction_by_angular_error on failure
             try:
-                num_points_before = len(reconstruction.points3D)
-                obs_manager = pycolmap.ObservationManager(reconstruction)
-                points3d_ids = set(reconstruction.points3D.keys())
-                num_filtered = (
-                    obs_manager.filter_points3D_with_large_reprojection_error(
-                        angular_error_threshold_deg,
-                        points3d_ids,
-                        pycolmap.ReprojectionErrorType.ANGULAR,  # error_type
-                    )
-                )
-                obs_manager.filter_points3D_with_short_tracks(
-                    min_track_length=2
-                )
-                logger.info(
-                    f"Real reconstruction: pycolmap filter removed "
-                    f"{num_filtered} observations, points3D "
-                    f"{num_points_before} -> {len(reconstruction.points3D)}"
+                filter_reconstruction_by_angular_error_colmap(
+                    reconstruction,
+                    angular_error_threshold_deg,
                 )
             except Exception as e:
                 logger.warning(
