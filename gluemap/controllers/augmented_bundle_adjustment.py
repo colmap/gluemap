@@ -539,12 +539,10 @@ def run_refinement_pipeline(
 
     # build_reconstruction_for_ba produces 0-indexed IDs but the COLMAP
     # database (from prepare_glomap_prior) uses 1-indexed IDs. Reindex the
-    # reconstructions once before the refinement loop so everything stays
-    # 1-indexed throughout.
+    # normal reconstruction and deepcopy it for the virtual reconstruction so
+    # both share the same image and camera IDs.
     reconstruction = reindex_reconstruction_for_triangulation(reconstruction)
-    virtual_reconstruction = reindex_reconstruction_for_triangulation(
-        virtual_reconstruction
-    )
+    virtual_reconstruction = deepcopy(reconstruction)
 
     # Re-key per-image dicts by matching image names to reconstruction IDs,
     # rather than assuming a fixed +1 offset.
