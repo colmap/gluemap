@@ -174,6 +174,80 @@ class TestBundleAdjustmentEndToEnd:
             for i in range(img.num_points2D()):
                 img.points2D[i].xy += rng.normal(0, noise_std, size=2)
 
+    @staticmethod
+    def _assert_same_cameras_and_poses(rec, ref, rtol=1e-6, atol=1e-8):
+        """Assert that *rec* and *ref* have identical cameras and poses."""
+        assert sorted(rec.cameras.keys()) == sorted(ref.cameras.keys()), (
+            "Camera IDs differ"
+        )
+        assert sorted(rec.reg_image_ids()) == sorted(ref.reg_image_ids()), (
+            "Image IDs differ"
+        )
+        for cam_id in rec.cameras.keys():
+            np.testing.assert_allclose(
+                rec.cameras[cam_id].params,
+                ref.cameras[cam_id].params,
+                rtol=rtol, atol=atol,
+                err_msg=f"Camera {cam_id} intrinsics differ",
+            )
+        for img_id in rec.reg_image_ids():
+            pose_r = rec.image(img_id).cam_from_world()
+            pose_g = ref.image(img_id).cam_from_world()
+            np.testing.assert_allclose(
+                np.array(pose_r.rotation.matrix()),
+                np.array(pose_g.rotation.matrix()),
+                rtol=rtol, atol=atol,
+                err_msg=f"Image {img_id} rotation differs",
+            )
+            np.testing.assert_allclose(
+                np.array(pose_r.translation),
+                np.array(pose_g.translation),
+                rtol=rtol, atol=atol,
+                err_msg=f"Image {img_id} translation differs",
+            )
+
+    def test_virtual_reconstruction_synced_after_ba(self):
+        """After BA, the virtual reconstruction's cameras and poses must be
+        synced to exactly match the reference (real) reconstruction.
+
+        Only the real reconstruction's numpy buffers flow into the ceres
+        problem; the virtual reconstruction keeps its pre-solve values
+        until ``update_poses_from_reconstruction`` copies them over at
+        the end of ``bundle_adjustment``.
+        """
+        gt_rec = create_synthetic_reconstruction(
+            num_frames=8, num_points3D=100, seed=4
+        )
+        rec_normal = copy.deepcopy(gt_rec)
+        rec_virtual = copy.deepcopy(gt_rec)
+        rng = np.random.default_rng(4)
+
+        # Perturb poses on both so BA actually moves them.
+        perturb_points3D(rec_normal, fraction=1.0, noise_std=0.02, rng=rng)
+        self._perturb_poses(rec_normal, translation_std=0.01, rotation_std_deg=0.5, rng=rng)
+        # The virtual reconstruction starts with GT poses — bundle_adjustment
+        # must overwrite them with the optimized ones from rec_normal.
+        assert not np.allclose(
+            np.array(rec_normal.image(1).cam_from_world().translation),
+            np.array(rec_virtual.image(1).cam_from_world().translation),
+        ), "Precondition: normal and virtual poses should differ before BA"
+
+        rec_normal, rec_virtual, summary = bundle_adjustment(
+            rec_normal,
+            rec_virtual,
+            negative_depth_observations={},
+            max_num_iterations=200,
+            loss_type_normal="huber",
+            loss_type_virtual="huber",
+        )
+        logger.info(
+            f"BA: initial_cost={summary.initial_cost:.6e}, "
+            f"final_cost={summary.final_cost:.6e}"
+        )
+
+        # After BA, virtual must have the same cameras and poses as normal.
+        self._assert_same_cameras_and_poses(rec_virtual, rec_normal)
+
     def test_ba_recovers_from_noise(self):
         """After adding small noise to 3D points and poses, BA should
         recover a reconstruction close to the original."""
