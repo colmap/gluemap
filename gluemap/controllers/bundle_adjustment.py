@@ -751,7 +751,7 @@ def iterative_bundle_adjustment(
         logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
         # Run BA via bundle_adjustment
-        reconstruction, virtual_reconstruction = bundle_adjustment(
+        reconstruction, virtual_reconstruction, _summary = bundle_adjustment(
             reconstruction,
             virtual_reconstruction,
             negative_depth_observations,

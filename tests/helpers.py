@@ -158,6 +158,28 @@ def build_predictions_dict(
     return predictions_dict
 
 
+def perturb_points3D(reconstruction, fraction=1.0, noise_std=1.0, rng=None):
+    """Add Gaussian noise to a fraction of 3D points in-place.
+
+    Args:
+        reconstruction: pycolmap.Reconstruction (modified in-place).
+        fraction: fraction of points to perturb (0.0 to 1.0).
+        noise_std: standard deviation of the Gaussian noise added to xyz.
+        rng: numpy random generator; created with default seed if None.
+
+    Returns:
+        Set of perturbed point3D IDs.
+    """
+    if rng is None:
+        rng = np.random.default_rng(0)
+    ids = [pid for pid, _ in reconstruction.points3D.items()]
+    n_perturb = int(len(ids) * fraction)
+    perturb_ids = rng.choice(ids, size=n_perturb, replace=False)
+    for pid in perturb_ids:
+        reconstruction.points3D[pid].xyz += rng.normal(0, noise_std, size=3)
+    return set(perturb_ids)
+
+
 def remap_to_original_ids(data_dict, reconstruction):
     """Remap 0-indexed dict keys back to the original pycolmap image IDs."""
     original_ids = sorted(reconstruction.reg_image_ids())

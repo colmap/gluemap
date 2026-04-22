@@ -11,19 +11,9 @@ from gluemap.controllers.augmented_bundle_adjustment import (
     filter_reconstruction_by_angular_error,
     filter_reconstruction_by_angular_error_colmap,
 )
-from tests.helpers import create_synthetic_reconstruction
+from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
-
-
-def _perturb_points3D(reconstruction, fraction, noise_std, rng):
-    """Add Gaussian noise to a fraction of 3D points in-place."""
-    ids = [pid for pid, _ in reconstruction.points3D.items()]
-    n_perturb = int(len(ids) * fraction)
-    perturb_ids = rng.choice(ids, size=n_perturb, replace=False)
-    for pid in perturb_ids:
-        reconstruction.points3D[pid].xyz += rng.normal(0, noise_std, size=3)
-    return set(perturb_ids)
 
 
 def _apply_colmap_filter(reconstruction, threshold):
@@ -70,7 +60,7 @@ class TestAngularErrorFilterEquivalence:
             num_frames=8, num_points3D=100, seed=seed
         )
         rng = np.random.default_rng(seed)
-        _perturb_points3D(rec, fraction=0.5, noise_std=2.0, rng=rng)
+        perturb_points3D(rec, fraction=0.5, noise_std=2.0, rng=rng)
         num_before = len([_ for _ in rec.points3D.items()])
 
         rec_colmap = copy.deepcopy(rec)
@@ -128,7 +118,7 @@ class TestAngularErrorFilterEquivalence:
             num_frames=8, num_points3D=100, seed=0
         )
         rng = np.random.default_rng(0)
-        _perturb_points3D(rec, fraction=1.0, noise_std=5.0, rng=rng)
+        perturb_points3D(rec, fraction=1.0, noise_std=5.0, rng=rng)
 
         rec_colmap = copy.deepcopy(rec)
         rec_custom = copy.deepcopy(rec)

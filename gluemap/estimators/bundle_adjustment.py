@@ -8,12 +8,50 @@ import pygluemap
 logger = logging.getLogger(__name__)
 
 
+def _pycolmap_loss_type(name: str):
+    """Map a loss type name to a pycolmap.LossFunctionType enum value."""
+    mapping = {
+        "trivial": pycolmap.LossFunctionType.TRIVIAL,
+        "huber": pycolmap.LossFunctionType.HUBER,
+        "cauchy": pycolmap.LossFunctionType.CAUCHY,
+    }
+    if name not in mapping:
+        raise ValueError(
+            f"Unknown loss type '{name}', expected one of {list(mapping.keys())}"
+        )
+    return mapping[name]
+
+
+def _pyceres_loss_function(name: str):
+    """Map a loss type name to a pyceres.LossFunction (or None for trivial)."""
+    configs = {
+        "trivial": None,
+        "huber": {"name": "huber", "params": [1.0], "magnitude": 1.0},
+        "arctan": {"name": "arctan", "params": [5.0], "magnitude": 1.0},
+        "cauchy": {"name": "cauchy", "params": [1.0], "magnitude": 1.0},
+    }
+    if name not in configs:
+        raise ValueError(
+            f"Unknown loss type '{name}', expected one of {list(configs.keys())}"
+        )
+    cfg = configs[name]
+    return pyceres.LossFunction(cfg) if cfg is not None else None
+
+
+# Sentinel: when callers pass no explicit loss_function, fall back to Arctan.
+# ``None`` itself is a valid Ceres value (trivial / squared loss), so we need
+# a distinct sentinel to distinguish "caller wants trivial" from "caller wants
+# the default".
+_DEFAULT_LOSS = object()
+
+
 def add_virtual_track_residuals(
     problem,
     virtual_reconstruction: pycolmap.Reconstruction | None,
     reference_reconstruction: pycolmap.Reconstruction,
     negative_depth_observations,
     fisheye_intrinsics_params=None,
+    loss_function=_DEFAULT_LOSS,
 ):
     """
     Add reprojection residuals for virtual tracks to an existing ceres problem.
@@ -28,8 +66,11 @@ def add_virtual_track_residuals(
     Virtual points3D are read from ``virtual_reconstruction``; their xyz
     arrays become new parameter blocks in ``problem`` via the residual block.
 
-    Arctan loss is always used for virtual points. If
-    ``fisheye_intrinsics_params`` is supplied, virtual residuals are built
+    If ``loss_function`` is not provided, Arctan loss is used for virtual
+    points (backward compatible).  Pass an explicit ``pyceres.LossFunction``
+    to override, or ``None`` for trivial (squared) loss.
+
+    If ``fisheye_intrinsics_params`` is supplied, virtual residuals are built
     against a SIMPLE_FISHEYE camera model using the (fixed) fisheye params,
     mirroring the previous behaviour at the disabled
     ``create_fisheye_cameras_and_rectify`` call site.
@@ -38,9 +79,11 @@ def add_virtual_track_residuals(
         return
 
     fisheye_model_id = pycolmap.CameraModelId.SIMPLE_FISHEYE
-    loss_arctan = pyceres.LossFunction(
-        {"name": "arctan", "params": [5.0], "magnitude": 1.0}
-    )
+    # Default to Arctan loss for backward compatibility.
+    if loss_function is _DEFAULT_LOSS:
+        loss_function = pyceres.LossFunction(
+            {"name": "arctan", "params": [5.0], "magnitude": 1.0}
+        )
 
     num_constraints = 0
     num_negative = 0
@@ -100,7 +143,7 @@ def add_virtual_track_residuals(
 
             problem.add_residual_block(
                 cost,
-                loss_arctan,
+                loss_function,
                 [world_point, cam_pose, camera_params],
             )
             num_constraints += 1
@@ -128,17 +171,19 @@ def bundle_adjustment(
     negative_depth_observations,
     max_num_iterations: int = 200,
     fisheye_intrinsics_params=None,
-) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None]:
+    loss_type_normal: str = "huber",
+    loss_type_virtual: str = "arctan",
+) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None, pyceres.SolverSummary]:
     """
     Bundle adjustment over real + virtual reconstructions.
 
     The real reconstruction is optimized via pycolmap's built-in ceres
-    bundle adjuster (handles manifolds, gauge fixing, solver selection,
-    and default Huber loss). Virtual residuals are appended manually to
-    the same ceres problem via ``add_virtual_track_residuals`` so that
-    they share the pose/intrinsic parameter blocks with the real residuals
-    but use Arctan loss (and optionally a fixed SIMPLE_FISHEYE camera
-    model with the provided ``fisheye_intrinsics_params``).
+    bundle adjuster (handles manifolds, gauge fixing, solver selection).
+    Virtual residuals are appended manually to the same ceres problem via
+    ``add_virtual_track_residuals`` so that they share the pose/intrinsic
+    parameter blocks with the real residuals (and optionally a fixed
+    SIMPLE_FISHEYE camera model with the provided
+    ``fisheye_intrinsics_params``).
 
     Args:
         reconstruction: pycolmap.Reconstruction holding the real tracks
@@ -153,10 +198,14 @@ def bundle_adjustment(
         fisheye_intrinsics_params: Optional List[np.ndarray] indexed by
             camera_id giving fixed fisheye intrinsics; when present,
             virtual residuals use SIMPLE_FISHEYE against these params.
+        loss_type_normal: Loss function for real tracks. One of
+            ``"trivial"``, ``"huber"``, ``"cauchy"``.
+        loss_type_virtual: Loss function for virtual tracks. One of
+            ``"trivial"``, ``"huber"``, ``"arctan"``, ``"cauchy"``.
 
     Returns:
-        (reconstruction, virtual_reconstruction) with parameters
-        updated in-place.
+        (reconstruction, virtual_reconstruction, summary) with parameters
+        updated in-place and the Ceres solver summary.
     """
     logger.info(
         f"Bundle adjustment: {len(reconstruction.points3D)} real tracks, "
@@ -168,7 +217,7 @@ def bundle_adjustment(
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
-    
+
     # Disable Schur auto-selection: the linear_solver_ordering that pycolmap
     # builds in ``create_solver_options`` does not match the parameter blocks
     # in the pyceres ``Problem`` (observed vertices.size() != ordering->size()),
@@ -181,10 +230,7 @@ def bundle_adjustment(
     ba_options.ceres.solver_options.linear_solver_type = (
         pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
     )
-    # Wrap real-track reprojection residuals in a Huber loss (matches the
-    # hand-rolled solver's prior behaviour). loss_function_scale stays at its
-    # default 1.0 which reproduces the previous Huber[1.0] magnitude=1.0.
-    ba_options.ceres.loss_function_type = pycolmap.LossFunctionType.HUBER
+    ba_options.ceres.loss_function_type = _pycolmap_loss_type(loss_type_normal)
 
     ba_config = pycolmap.BundleAdjustmentConfig()
     for image_id in reconstruction.images:
@@ -212,6 +258,7 @@ def bundle_adjustment(
         reference_reconstruction=reconstruction,
         negative_depth_observations=negative_depth_observations,
         fisheye_intrinsics_params=fisheye_intrinsics_params,
+        loss_function=_pyceres_loss_function(loss_type_virtual),
     )
 
     logger.info(
@@ -244,4 +291,4 @@ def bundle_adjustment(
 
         update_poses_from_reconstruction(reconstruction, virtual_reconstruction)
 
-    return reconstruction, virtual_reconstruction
+    return reconstruction, virtual_reconstruction, summary
