@@ -585,12 +585,12 @@ def filter_observations_by_error(
     """
     Filter observations with high reprojection errors from a reconstruction.
 
-    Uses pycolmap's reference-aware deletion methods
-    (``Reconstruction.delete_point3D`` / ``Reconstruction.delete_observation``)
-    so that ``image.points2D[i].point3D_id`` references are cleared alongside
-    track elements. This keeps the reconstruction valid for downstream
-    consumers that call ``Reconstruction.IsValid()`` (e.g. pycolmap's built-in
-    ceres bundle adjuster).
+    Wholesale track removal goes through ``Reconstruction.delete_point3D``.
+    Per-observation outliers are dropped by hand with
+    ``Point3D.track.delete_element`` + ``Image.reset_point3D_for_point2D``
+    (mirroring COLMAP's C++ core), which keeps ``image.points2D[i].point3D_id``
+    consistent with the track without triggering pycolmap's auto-delete of
+    tracks that drop below 2 elements.
 
     Args:
         reconstruction: pycolmap.Reconstruction (modified in place).
@@ -629,13 +629,9 @@ def filter_observations_by_error(
             num_tracks_removed += 1
         else:
             for image_id, pt_idx in outlier_obs:
-                if point3D_id not in reconstruction.points3D:
-                    # delete_observation auto-deletes the point3D when the
-                    # track would drop below 2 elements; stop once that
-                    # happens.
-                    num_tracks_removed += 1
-                    break
-                reconstruction.delete_observation(image_id, pt_idx)
+                image = reconstruction.images[image_id]
+                point3D.track.delete_element(image_id, pt_idx)
+                image.reset_point3D_for_point2D(pt_idx)
                 num_observations_removed += 1
 
     return num_observations_removed, num_tracks_removed
