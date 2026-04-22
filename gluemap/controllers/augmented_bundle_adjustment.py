@@ -97,17 +97,10 @@ def create_fisheye_cameras_and_rectify(
     return fisheye_intrinsics_params, fisheye_cameras
 
 
-def select_tracks_from_merged(
+def _extract_track_csr(
     reconstruction: pycolmap.Reconstruction,
-    sift_count: dict[int, int],
-    min_num_support_abs: int = 512,
-) -> dict[tuple[int, int], int]:
-    """
-    Selectively prune non-SIFT tracks from a merged reconstruction.
-    Extracts track data as numpy arrays, delegates hot loops to C++ in pygluemap,
-    then applies deletions via pycolmap. Returns the image-pair coverage map
-    {(img_low, img_high): count} from after selection, for downstream use.
-    """
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Extract track data from a reconstruction as CSR numpy arrays."""
     point3d_ids = []
     track_img_ids = []
     track_pt2d_idxs = []
@@ -119,27 +112,71 @@ def select_tracks_from_merged(
         for e in elems:
             track_img_ids.append(e.image_id)
             track_pt2d_idxs.append(e.point2D_idx)
-
-    point3d_ids_np = np.array(point3d_ids, dtype=np.int64)
-    track_img_ids_np = np.array(track_img_ids, dtype=np.int64)
-    track_pt2d_idxs_np = np.array(track_pt2d_idxs, dtype=np.int64)
-    track_lengths_np = np.array(track_lengths, dtype=np.int32)
-
-    sc = {int(k): int(v) for k, v in sift_count.items()}
-
-    ids_to_delete, pair_count = pygluemap.compute_tracks_to_delete(
-        point3d_ids_np,
-        track_img_ids_np,
-        track_pt2d_idxs_np,
-        track_lengths_np,
-        sc,
-        min_num_support_abs,
+    return (
+        np.array(point3d_ids, dtype=np.int64),
+        np.array(track_img_ids, dtype=np.int64),
+        np.array(track_pt2d_idxs, dtype=np.int64),
+        np.array(track_lengths, dtype=np.int32),
     )
 
+
+def _apply_deletions(
+    reconstruction: pycolmap.Reconstruction,
+    ids_to_delete: np.ndarray,
+) -> None:
+    """Delete point3D entries returned by a C++ track selector."""
     for p3d_id in ids_to_delete:
         reconstruction.delete_point3D(int(p3d_id))
 
+
+def select_tracks_from_merged(
+    reconstruction: pycolmap.Reconstruction,
+    sift_count: dict[int, int],
+    min_num_support_abs: int = 512,
+) -> dict[int, int]:
+    """
+    Selectively prune non-SIFT tracks from a merged reconstruction.
+    Returns the image-pair coverage map {canonical_pair_key: count}.
+    The canonical key encodes (img_low, img_high) as (img_low << 32) | img_high.
+    """
+    point3d_ids, track_img_ids, track_pt2d_idxs, track_lengths = (
+        _extract_track_csr(reconstruction)
+    )
+    sc = {int(k): int(v) for k, v in sift_count.items()}
+
+    ids_to_delete, pair_count = pygluemap.compute_tracks_to_delete(
+        point3d_ids, track_img_ids, track_pt2d_idxs, track_lengths,
+        sc, min_num_support_abs,
+    )
+    _apply_deletions(reconstruction, ids_to_delete)
     return pair_count
+
+
+def select_virtual_tracks_from_merged(
+    reconstruction: pycolmap.Reconstruction,
+    pair_count: dict[int, int],
+    min_num_support_abs: int = 512,
+) -> dict[int, int]:
+    """
+    Selectively prune virtual tracks using existing pair coverage.
+    Removes tracks whose image pairs are all already sufficiently covered.
+    Returns the updated pair_count.
+    """
+    if len(reconstruction.points3D) == 0:
+        return pair_count
+
+    point3d_ids, track_img_ids, track_pt2d_idxs, track_lengths = (
+        _extract_track_csr(reconstruction)
+    )
+
+    ids_to_delete, updated_pair_count = (
+        pygluemap.compute_virtual_tracks_to_delete(
+            point3d_ids, track_img_ids, track_pt2d_idxs, track_lengths,
+            pair_count, min_num_support_abs,
+        )
+    )
+    _apply_deletions(reconstruction, ids_to_delete)
+    return updated_pair_count
 
 
 def update_poses_from_reconstruction(
@@ -567,11 +604,19 @@ def run_refinement_pipeline(
         for recon_id, img in reconstruction.images.items():
             sift_count[recon_id] = sift_count_by_name.get(img.name, 0)
 
-        select_tracks_from_merged(
+        pair_count = select_tracks_from_merged(
             reconstruction=reconstruction,
             sift_count=sift_count,
             min_num_support_abs=512,
         )
+
+        # Step 7a.2: Prune virtual tracks using pair coverage from real selection
+        if virtual_reconstruction is not None:
+            updated_pair_count = select_virtual_tracks_from_merged(
+                reconstruction=virtual_reconstruction,
+                pair_count=pair_count,
+                min_num_support_abs=512,
+            )
 
         # Step 7b: Create fisheye cameras and rectify virtual 2D points
         # fisheye_intrinsics_params, fisheye_cameras = create_fisheye_cameras_and_rectify(

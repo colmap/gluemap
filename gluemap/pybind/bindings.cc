@@ -13,13 +13,21 @@
 namespace py = pybind11;
 using namespace pybind11::literals;
 
-// Forward declaration from track_selection.cc
+// Forward declarations from track_selection.cc
 py::tuple ComputeTracksToDeleteWrapper(
     py::array_t<int64_t, py::array::c_style> point3d_ids,
     py::array_t<int64_t, py::array::c_style> track_image_ids,
     py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
     py::array_t<int32_t, py::array::c_style> track_lengths,
     const std::unordered_map<int64_t, int> &sift_count,
+    int min_num_support_abs);
+
+py::tuple ComputeVirtualTracksToDeleteWrapper(
+    py::array_t<int64_t, py::array::c_style> point3d_ids,
+    py::array_t<int64_t, py::array::c_style> track_image_ids,
+    py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
+    py::array_t<int32_t, py::array::c_style> track_lengths,
+    const std::unordered_map<uint64_t, int> &pair_count_in,
     int min_num_support_abs);
 
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
@@ -143,4 +151,13 @@ PYBIND11_MODULE(pygluemap, m) {
         "ids_to_delete is an int64 array of point3D IDs to delete and "
         "pair_count is a dict mapping (img_low, img_high) tuples to coverage "
         "counts after selection.");
+
+  m.def("compute_virtual_tracks_to_delete",
+        &ComputeVirtualTracksToDeleteWrapper, py::arg("point3d_ids"),
+        py::arg("track_image_ids"), py::arg("track_pt2d_idxs"),
+        py::arg("track_lengths"), py::arg("pair_count"),
+        py::arg("min_num_support_abs") = 512,
+        "Select virtual tracks given existing pair coverage. Returns "
+        "(ids_to_delete, updated_pair_count). Tracks whose image pairs are "
+        "all above min_num_support_abs are removed.");
 }
