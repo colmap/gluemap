@@ -766,8 +766,8 @@ def iterative_bundle_adjustment(
             errors_real = compute_all_errors_from_reconstruction(
                 reconstruction,
                 ReprojectionErrorType.NORMALIZED,
-                negative_depth_observations,
-                virtual_point_start=virtual_point_start,
+                {},
+                virtual_point_start={},  # No virtual points in real reconstruction
                 fisheye_cameras=None,
             )
             errors_virtual = (
