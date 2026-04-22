@@ -105,35 +105,30 @@ def build_reconstruction_for_ba(
         camera_model: Camera model string
 
     Returns:
-        pycolmap.Reconstruction with 1-indexed image and camera IDs (matching
-        the COLMAP database convention produced by prepare_glomap_prior).
-        Inputs remain keyed by 0-indexed image/camera IDs; the shift is applied
-        internally when populating the reconstruction.
+        pycolmap.Reconstruction
     """
     reconstruction = pycolmap.Reconstruction()
 
-    # Add cameras (shifted to 1-indexed to match the COLMAP database)
-    for camera_idx, intrinsics in enumerate(global_intrinsics):
+    # Add cameras
+    for camera_id, intrinsics in enumerate(global_intrinsics):
         if intrinsics is None:
             continue
 
-        # Find image size for this camera (use first image with this camera_idx)
+        # Find image size for this camera (use first image with this camera_id)
         width, height = None, None
         if image_sizes is not None:
             for img_id, cam_id in intrinsics_mapping.items():
-                if cam_id == camera_idx and img_id < len(image_sizes):
+                if cam_id == camera_id and img_id < len(image_sizes):
                     height, width = image_sizes[img_id]
                     break
 
         # Note that there is an extra dimension in intrinsics, so we take intrinsics[0]
         camera = camera_from_intrinsics_matrix(
-            intrinsics[0], camera_model, width, height, camera_idx + 1
+            intrinsics[0], camera_model, width, height, camera_id
         )
         reconstruction.add_camera_with_trivial_rig(camera)
 
-    # Add images (shifted to 1-indexed). image_sizes / images_list /
-    # keypoints_per_image / global_rotations / global_centers stay keyed by
-    # the 0-indexed image_id used in the loop.
+    # Add images
     for image_id in global_rotations:
         if image_id not in global_centers:
             continue
@@ -144,8 +139,8 @@ def build_reconstruction_for_ba(
         center = global_centers[image_id]
 
         image = pycolmap.Image()
-        image.image_id = image_id + 1
-        image.camera_id = intrinsics_mapping[image_id] + 1
+        image.image_id = image_id
+        image.camera_id = intrinsics_mapping[image_id]
 
         # Add 2D points
         if image_id in keypoints_per_image:
@@ -164,16 +159,14 @@ def build_reconstruction_for_ba(
         cam_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(R), t)
         reconstruction.add_image_with_trivial_frame(image, cam_from_world)
 
-    # Add 3D points. Input track elements use 0-indexed image_ids; shift them
-    # by +1 so they reference the 1-indexed images added above.
+    # Add 3D points
+    # Note: add_point3D returns the assigned ID, we can't specify it
+    # We need to track the mapping if IDs change
     for point3D_id, point3D in points3D.items():
         xyz = (
             point3D.xyz.reshape(3, 1) if point3D.xyz.ndim == 1 else point3D.xyz
         )
-        shifted_track = pycolmap.Track()
-        for elem in point3D.track.elements:
-            shifted_track.add_element(elem.image_id + 1, elem.point2D_idx)
-        reconstruction.add_point3D(xyz, shifted_track)
+        reconstruction.add_point3D(xyz, point3D.track)
 
     return reconstruction
 

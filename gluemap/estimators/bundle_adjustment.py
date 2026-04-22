@@ -85,6 +85,13 @@ def add_virtual_track_residuals(
             {"name": "arctan", "params": [5.0], "magnitude": 1.0}
         )
 
+    # Match virtual images to reference images by name so the function is
+    # independent of the image-ID convention used by each reconstruction.
+    name_to_ref_id = {
+        img.name: img_id
+        for img_id, img in reference_reconstruction.images.items()
+    }
+
     num_constraints = 0
     num_negative = 0
     num_skipped = 0
@@ -100,24 +107,26 @@ def add_virtual_track_residuals(
         for elem in point3D.track.elements:
             image_id, pt_idx = elem.image_id, elem.point2D_idx
 
-            if image_id not in reference_reconstruction.images:
-                num_skipped += 1
-                continue
             if image_id not in virtual_reconstruction.images:
                 num_skipped += 1
                 continue
 
             image = virtual_reconstruction.images[image_id]
+            ref_id = name_to_ref_id.get(image.name)
+            if ref_id is None:
+                num_skipped += 1
+                continue
+
             if pt_idx >= len(image.points2D):
                 num_skipped += 1
                 continue
             point2D = image.points2D[pt_idx].xy
 
-            camera_id = reference_reconstruction.images[image_id].camera_id
+            camera_id = reference_reconstruction.images[ref_id].camera_id
 
             # Pose & intrinsics come from the reference reconstruction so the
             # underlying numpy buffers are shared with pycolmap's residuals.
-            cam_pose = reference_reconstruction.frames[image_id].rig_from_world.params
+            cam_pose = reference_reconstruction.frames[ref_id].rig_from_world.params
             if (
                 fisheye_intrinsics_params is not None
                 and camera_id < len(fisheye_intrinsics_params)
@@ -130,8 +139,8 @@ def add_virtual_track_residuals(
                 active_model_id = reference_reconstruction.cameras[camera_id].model
 
             is_negative = (
-                image_id in negative_depth_observations
-                and pt_idx in negative_depth_observations[image_id]
+                ref_id in negative_depth_observations
+                and pt_idx in negative_depth_observations[ref_id]
             )
             if is_negative:
                 cost = pygluemap.ReprojErrorCostWithNegativeDepth(
