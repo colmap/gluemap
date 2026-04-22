@@ -264,3 +264,72 @@ class TestBundleAdjustmentEndToEnd:
 
         assert max_rot < 1.0, f"Max rotation error {max_rot:.4f} deg >= 1.0 deg"
         assert max_center < 0.1, f"Max center error {max_center:.6f} >= 0.1"
+
+    @staticmethod
+    def _build_2view_reconstruction(source):
+        """Build a new reconstruction where every track has exactly 2 observations."""
+        rec = pycolmap.Reconstruction()
+        for cam_id in sorted(source.cameras.keys()):
+            rec.add_camera_with_trivial_rig(source.cameras[cam_id])
+        for img_id in sorted(source.reg_image_ids()):
+            img = source.image(img_id)
+            new_img = pycolmap.Image()
+            new_img.image_id = img_id
+            new_img.camera_id = img.camera_id
+            new_img.name = img.name
+            for i in range(img.num_points2D()):
+                new_img.points2D.append(pycolmap.Point2D(np.array(img.points2D[i].xy)))
+            rec.add_image_with_trivial_frame(new_img, img.cam_from_world())
+        for pid in sorted(source.point3D_ids()):
+            p = source.point3D(pid)
+            elems = list(p.track.elements)
+            track = pycolmap.Track()
+            for e in elems[:2]:
+                track.add_element(e.image_id, e.point2D_idx)
+            rec.add_point3D(np.array(p.xyz).reshape(3, 1), track)
+        return rec
+
+    def test_ba_recovers_with_2view_tracks(self):
+        """BA should recover the reconstruction even when every 3D point
+        has only 2-view tracks (the minimum for triangulation)."""
+        gt_rec = create_synthetic_reconstruction(
+            num_frames=8, num_points3D=100, seed=2
+        )
+        gt_rec_2view = self._build_2view_reconstruction(gt_rec)
+
+        rec = copy.deepcopy(gt_rec_2view)
+        rng = np.random.default_rng(2)
+
+        # Add noise to 3D points and poses
+        perturb_points3D(rec, fraction=1.0, noise_std=0.02, rng=rng)
+        self._perturb_poses(rec, translation_std=0.01, rotation_std_deg=0.5, rng=rng)
+
+        rec, _, summary = bundle_adjustment(
+            rec,
+            virtual_reconstruction=None,
+            negative_depth_observations={},
+            max_num_iterations=200,
+            loss_type_normal="huber",
+        )
+        logger.info(
+            f"BA (2-view tracks): initial_cost={summary.initial_cost:.6e}, "
+            f"final_cost={summary.final_cost:.6e}"
+        )
+
+        result = pycolmap.compare_reconstructions(
+            rec, gt_rec_2view,
+            alignment_error="proj_center",
+            max_proj_center_error=100.0,
+        )
+        assert result is not None, "Sim3 alignment failed"
+        errors = result["errors"]
+
+        max_rot = max(e.rotation_error_deg for e in errors)
+        max_center = max(e.proj_center_error for e in errors)
+        logger.info(f"max rotation error: {max_rot:.4f} deg")
+        logger.info(f"max center error:   {max_center:.6f}")
+
+        # 2-view tracks are less constrained than full tracks, so use
+        # looser thresholds than the multi-view tests above.
+        assert max_rot < 2.0, f"Max rotation error {max_rot:.4f} deg >= 2.0 deg"
+        assert max_center < 0.1, f"Max center error {max_center:.6f} >= 0.1"
