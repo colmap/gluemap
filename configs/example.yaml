@@ -2,10 +2,10 @@
 chosen_model: pi3
 
 # Model paths
-path_feedforward: ""
-path_retrieval: ""
-path_tracker: ""
-path_dg: ""
+path_feedforward: checkpoints/pi3.safetensors
+path_retrieval:   checkpoints/dino_salad.ckpt
+path_tracker:     checkpoints/vggsfm_v2_0_0_track_predictor.bin
+path_dg:          checkpoints/checkpoint-dg+visym.pth
 
 # IO
 images_path: /path/to/images

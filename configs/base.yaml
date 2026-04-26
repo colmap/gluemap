@@ -1,4 +1,4 @@
-# Base configuration for GlueMap benchmarks.
+# Base configuration for GLUEMAP benchmarks.
 # Shared model paths and pipeline defaults — inherit with: _base_: "base.yaml"
 # All keys are flat and match cli.py / configs/example.yaml arg names.
 

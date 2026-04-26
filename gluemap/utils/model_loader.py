@@ -4,14 +4,14 @@ import os
 # sys.modules to avoid namespace collision with croco's models directory.
 import sys
 
-from mapanything.models.mapanything.model import MapAnything
-from mast3r.model import AsymmetricMASt3R
-from pi3.models.pi3 import Pi3
-from pi3.models.pi3x import Pi3X
-from vggsfm.vggsfm_tracker import TrackerPredictor
-from vggt.models.vggt import VGGT
-
 import thirdparty.path_to_thirdparty  # noqa: F401  (adds all thirdparty submodules to sys.path)
+
+from mapanything.models.mapanything.model import MapAnything  # noqa: E402
+from mast3r.model import AsymmetricMASt3R  # noqa: E402
+from pi3.models.pi3 import Pi3  # noqa: E402
+from pi3.models.pi3x import Pi3X  # noqa: E402
+from vggsfm.vggsfm_tracker import TrackerPredictor  # noqa: E402
+from vggt.models.vggt import VGGT  # noqa: E402
 
 _salad_path = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "../../thirdparty/salad")

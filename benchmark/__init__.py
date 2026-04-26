@@ -1,4 +1,4 @@
-"""Benchmark module for GlueMap evaluation on standard datasets."""
+"""Benchmark module for GLUEMAP evaluation on standard datasets."""
 
 from benchmark.evaluate import (
     load_colmap_reconstruction,

@@ -30,7 +30,7 @@ from gluemap.utils.colmap import (
 
 class GlueMapPipeline:
     """
-    Main GlueMap pipeline: twoview -> star -> global mapping -> refinement.
+    Main GLUEMAP pipeline: twoview -> star -> global mapping -> refinement.
 
     Stable configuration is stored as instance attributes. Per-dataset inputs
     are passed to ``run()`` or ``run_postprocessing()``.

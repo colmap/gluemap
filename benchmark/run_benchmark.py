@@ -1,4 +1,4 @@
-"""Main benchmark script for running GlueMap on multiple datasets."""
+"""Main benchmark script for running GLUEMAP on multiple datasets."""
 
 import argparse
 import os
@@ -131,7 +131,7 @@ def run_single_dataset(
     show_viz: bool = False,
     models=None,
 ) -> Dict[str, Any]:
-    """Run the GlueMap pipeline on a single dataset and evaluate.
+    """Run the GLUEMAP pipeline on a single dataset and evaluate.
 
     Args:
         config: Configuration dictionary
@@ -370,7 +370,7 @@ def run_benchmark(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run GlueMap benchmark on multiple datasets"
+        description="Run GLUEMAP benchmark on multiple datasets"
     )
 
     parser.add_argument(
