@@ -153,7 +153,7 @@ def select_tracks_from_merged(
 
 
 def select_virtual_tracks_from_merged(
-    reconstruction: pycolmap.Reconstruction,
+    virtual_reconstruction: pycolmap.Reconstruction,
     pair_count: dict[int, int],
     min_num_support_abs: int = 512,
 ) -> dict[int, int]:
@@ -162,11 +162,11 @@ def select_virtual_tracks_from_merged(
     Removes tracks whose image pairs are all already sufficiently covered.
     Returns the updated pair_count.
     """
-    if len(reconstruction.points3D) == 0:
+    if len(virtual_reconstruction.points3D) == 0:
         return pair_count
 
     point3d_ids, track_img_ids, track_pt2d_idxs, track_lengths = (
-        _extract_track_csr(reconstruction)
+        _extract_track_csr(virtual_reconstruction)
     )
 
     ids_to_delete, updated_pair_count = (
@@ -175,31 +175,8 @@ def select_virtual_tracks_from_merged(
             pair_count, min_num_support_abs,
         )
     )
-    _apply_deletions(reconstruction, ids_to_delete)
+    _apply_deletions(virtual_reconstruction, ids_to_delete)
     return updated_pair_count
-
-
-def update_poses_from_reconstruction(
-    source_recon: pycolmap.Reconstruction,
-    target_recon: pycolmap.Reconstruction,
-) -> None:
-    """
-    Copy BA-optimized poses and camera intrinsics from source to target reconstruction.
-    Matches images by name.
-    """
-    source_by_name = {
-        img.name: (img_id, img) for img_id, img in source_recon.images.items()
-    }
-    for target_id, target_img in target_recon.images.items():
-        if target_img.name in source_by_name:
-            src_id, src_img = source_by_name[target_img.name]
-            target_recon.frames[
-                target_id
-            ].rig_from_world = src_img.cam_from_world()
-    # Copy camera intrinsics
-    for cam_id, cam in source_recon.cameras.items():
-        if cam_id in target_recon.cameras:
-            target_recon.cameras[cam_id].params = cam.params
 
 
 def reindex_reconstruction_for_triangulation(
@@ -527,7 +504,7 @@ def run_refinement_pipeline(
         camera_model=dataset_pair.camera_model,
     )
     refinement_timing["build_reconstruction"] = time.perf_counter() - t0
-    reconstruction = deepcopy(virtual_reconstruction)
+    # reconstruction = deepcopy(virtual_reconstruction)
 
     # Step 6: Build negative depth and virtual point data
     # Original: build from pts2d_idx_inv
@@ -541,8 +518,8 @@ def run_refinement_pipeline(
     # database (from prepare_glomap_prior) uses 1-indexed IDs. Reindex the
     # normal reconstruction and deepcopy it for the virtual reconstruction so
     # both share the same image and camera IDs.
-    reconstruction = reindex_reconstruction_for_triangulation(reconstruction)
-    virtual_reconstruction = deepcopy(reconstruction)
+    virtual_reconstruction = reindex_reconstruction_for_triangulation(virtual_reconstruction)
+    reconstruction = deepcopy(virtual_reconstruction)
 
     # Re-key per-image dicts by matching image names to reconstruction IDs,
     # rather than assuming a fixed +1 offset.
@@ -611,7 +588,7 @@ def run_refinement_pipeline(
         # Step 7a.2: Prune virtual tracks using pair coverage from real selection
         if virtual_reconstruction is not None:
             updated_pair_count = select_virtual_tracks_from_merged(
-                reconstruction=virtual_reconstruction,
+                virtual_reconstruction=virtual_reconstruction,
                 pair_count=pair_count,
                 min_num_support_abs=512,
             )

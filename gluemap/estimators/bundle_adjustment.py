@@ -7,6 +7,29 @@ import pygluemap
 
 logger = logging.getLogger(__name__)
 
+def update_poses_from_reconstruction(
+    source_recon: pycolmap.Reconstruction,
+    target_recon: pycolmap.Reconstruction,
+) -> None:
+    """
+    Copy BA-optimized poses and camera intrinsics from source to target reconstruction.
+    Matches images by name.
+    """
+    source_by_name = {
+        img.name: (img_id, img) for img_id, img in source_recon.images.items()
+    }
+    for target_id, target_img in target_recon.images.items():
+        if target_img.name in source_by_name:
+            src_id, src_img = source_by_name[target_img.name]
+            target_recon.frames[
+                target_id
+            ].rig_from_world = src_img.cam_from_world()
+    # Copy camera intrinsics
+    for cam_id, cam in source_recon.cameras.items():
+        if cam_id in target_recon.cameras:
+            target_recon.cameras[cam_id].params = cam.params
+
+
 
 def _pycolmap_loss_type(name: str):
     """Map a loss type name to a pycolmap.LossFunctionType enum value."""
@@ -81,9 +104,7 @@ def add_virtual_track_residuals(
     fisheye_model_id = pycolmap.CameraModelId.SIMPLE_FISHEYE
     # Default to Arctan loss for backward compatibility.
     if loss_function is _DEFAULT_LOSS:
-        loss_function = pyceres.LossFunction(
-            {"name": "arctan", "params": [5.0], "magnitude": 1.0}
-        )
+        loss_function = _pyceres_loss_function("arctan")
 
     # Match virtual images to reference images by name so the function is
     # independent of the image-ID convention used by each reconstruction.
@@ -139,8 +160,8 @@ def add_virtual_track_residuals(
                 active_model_id = reference_reconstruction.cameras[camera_id].model
 
             is_negative = (
-                ref_id in negative_depth_observations
-                and pt_idx in negative_depth_observations[ref_id]
+                image_id in negative_depth_observations
+                and pt_idx in negative_depth_observations[image_id]
             )
             if is_negative:
                 cost = pygluemap.ReprojErrorCostWithNegativeDepth(
@@ -278,11 +299,11 @@ def bundle_adjustment(
     )
 
     # --- Solve -------------------------------------------------------------
-    solver_options = ba_options.ceres.create_solver_options(
-        ba_config, problem
-    )
+    # solver_options = ba_options.ceres.create_solver_options(
+    #     ba_config, problem
+    # )
     summary = pyceres.SolverSummary()
-    pyceres.solve(solver_options, problem, summary)
+    pyceres.solve(ba_options.ceres.solver_options, problem, summary)
     logger.info(summary.BriefReport())
 
     # --- Sync poses/intrinsics into the virtual reconstruction -------------
@@ -294,9 +315,6 @@ def bundle_adjustment(
     if virtual_reconstruction is not None:
         # Lazy import to avoid a circular estimators -> controllers import
         # at module load time.
-        from gluemap.controllers.augmented_bundle_adjustment import (
-            update_poses_from_reconstruction,
-        )
 
         update_poses_from_reconstruction(reconstruction, virtual_reconstruction)
 
