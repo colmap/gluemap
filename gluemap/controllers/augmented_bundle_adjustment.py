@@ -180,7 +180,7 @@ def select_virtual_tracks_from_merged(
 
 
 def reindex_reconstruction_for_triangulation(
-    reconstruction: pycolmap.Reconstruction,
+    reconstruction: pycolmap.Reconstruction, idx_diff: int = 1
 ) -> pycolmap.Reconstruction:
     """
     Create a copy of the reconstruction with 1-indexed IDs to match the COLMAP database.
@@ -194,7 +194,7 @@ def reindex_reconstruction_for_triangulation(
 
     old_to_new_cam = {}
     for cam_id, camera in reconstruction.cameras.items():
-        new_cam_id = cam_id + 1
+        new_cam_id = cam_id + idx_diff
         new_cam = pycolmap.Camera(
             camera_id=new_cam_id,
             model=camera.model_name,
@@ -208,12 +208,12 @@ def reindex_reconstruction_for_triangulation(
     old_to_new_img = {}
     for img_id, image in reconstruction.images.items():
         new_img = pycolmap.Image()
-        new_img.image_id = img_id + 1
+        new_img.image_id = img_id + idx_diff
         new_img.camera_id = old_to_new_cam[image.camera_id]
         new_img.name = image.name
         for pt2d in image.points2D:
             new_img.points2D.append(pycolmap.Point2D(pt2d.xy))
-        old_to_new_img[img_id] = img_id + 1
+        old_to_new_img[img_id] = img_id + idx_diff
         new_recon.add_image_with_trivial_frame(new_img, image.cam_from_world())
 
     for p3d_id, point3D in reconstruction.points3D.items():
@@ -514,31 +514,6 @@ def run_refinement_pipeline(
         pts2d_idx_inv, images_points2d_virtual_isnegative
     )
 
-    # build_reconstruction_for_ba produces 0-indexed IDs but the COLMAP
-    # database (from prepare_glomap_prior) uses 1-indexed IDs. Reindex the
-    # normal reconstruction and deepcopy it for the virtual reconstruction so
-    # both share the same image and camera IDs.
-    virtual_reconstruction = reindex_reconstruction_for_triangulation(virtual_reconstruction)
-    reconstruction = deepcopy(virtual_reconstruction)
-
-    # Re-key per-image dicts by matching image names to reconstruction IDs,
-    # rather than assuming a fixed +1 offset.
-    name_to_recon_id = {
-        img.name: recon_id
-        for recon_id, img in reconstruction.images.items()
-    }
-    images_list = dataset_pair.images_list
-    virtual_point_start = {
-        name_to_recon_id[images_list[img_id]]: v
-        for img_id, v in virtual_point_start.items()
-        if img_id < len(images_list) and images_list[img_id] in name_to_recon_id
-    }
-    negative_depth_observations = {
-        name_to_recon_id[images_list[img_id]]: s
-        for img_id, s in negative_depth_observations.items()
-        if img_id < len(images_list) and images_list[img_id] in name_to_recon_id
-    }
-
     database_path = args.curr_path + "/database_merged.db"
     triangulated_output_path = args.curr_path + "/coarse_triangulated"
 
@@ -563,6 +538,7 @@ def run_refinement_pipeline(
         )
         opt_triang.ba_global_max_refinements = 0
 
+        reconstruction = reindex_reconstruction_for_triangulation(virtual_reconstruction, idx_diff=1)
         reconstruction = pycolmap.triangulate_points(
             reconstruction,
             database_path,
@@ -572,6 +548,7 @@ def run_refinement_pipeline(
             refine_intrinsics=False,
             options=opt_triang,
         )
+        reconstruction = reindex_reconstruction_for_triangulation(reconstruction, idx_diff=-1)
         t_tri_end = time.perf_counter()
 
         # Step 7a: Selectively prune prior/virtual tracks (SelectTrack logic)
