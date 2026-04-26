@@ -6,15 +6,8 @@ cmake_policy(SET CMP0057 NEW)  # Fix IN_LIST handling
 
 set(CMAKE_BUILD_TYPE Release)
 
-find_package (Python COMPONENTS Interpreter Development)
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 message(STATUS "Python_EXECUTABLE: " ${Python_EXECUTABLE})
-
-execute_process(
-    COMMAND python3 -c "import site; print(site.getsitepackages()[0])"
-    OUTPUT_VARIABLE PYTHON_SITE_PACKAGES
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
 
 find_package(pybind11 CONFIG REQUIRED)
 find_package(Eigen3)
@@ -32,5 +25,16 @@ target_link_libraries(pygluemap PRIVATE pybind11::module Eigen3::Eigen ${CERES_L
 target_compile_definitions(pygluemap PRIVATE cxx_std_17)
 target_compile_definitions(pygluemap PRIVATE CERES_HAS_CUDA)
 
-# install the module to the site-packages directory
-install(TARGETS pygluemap DESTINATION ${PYTHON_SITE_PACKAGES})
+# Bake the directories of linked libraries (Ceres, etc.) into the
+# extension's RPATH so loading pygluemap also picks up the matching
+# libstdc++ / libceres from $CONDA_PREFIX/lib at runtime, without
+# requiring the user to set LD_LIBRARY_PATH.
+set_target_properties(pygluemap PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+)
+
+# scikit-build-core sets CMAKE_INSTALL_PREFIX to the wheel staging dir;
+# combined with `wheel.install-dir = "/"` in pyproject.toml, this lands
+# pygluemap at the top of site-packages (matching the legacy install).
+install(TARGETS pygluemap DESTINATION .)

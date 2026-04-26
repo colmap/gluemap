@@ -21,7 +21,7 @@ from benchmark.utils import load_config, load_datasets_from_config
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run GlueMap benchmark across multiple GPUs (one experiment per GPU)"
+        description="Run GLUEMAP benchmark across multiple GPUs (one experiment per GPU)"
     )
     parser.add_argument(
         "--config", type=str, required=True, help="Path to the YAML config file"
