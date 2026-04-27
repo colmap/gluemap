@@ -660,34 +660,7 @@ def run_refinement_pipeline(
     if os.path.exists(triangulated_output_path):
         shutil.rmtree(triangulated_output_path)
 
-    # Step 9: Filter out 3D points that have any virtual observations
-    t0 = time.perf_counter()
-    if use_virtual:
-        # A 3D point is removed if ANY of its track observations are virtual
-        virtual_point3D_ids = []
-        for point3D_id, point3D in reconstruction.points3D.items():
-            is_any_virtual = False
-            for elem in point3D.track.elements:
-                image_id = elem.image_id
-                point2D_idx = elem.point2D_idx
-                vp_start = virtual_point_start.get(image_id, float("inf"))
-                if point2D_idx >= vp_start:
-                    is_any_virtual = True
-                    break
-            if is_any_virtual:
-                virtual_point3D_ids.append(point3D_id)
-
-        for point3D_id in virtual_point3D_ids:
-            reconstruction.delete_point3D(point3D_id)
-
-        logger.info(
-            f"Removed {len(virtual_point3D_ids)} virtual 3D points, {len(reconstruction.points3D)} real points remaining"
-        )
-    else:
-        logger.info("No virtual points to remove (track mode has no V).")
-    refinement_timing["remove_virtual"] = time.perf_counter() - t0
-
-    # Step 10: Write bundle adjusted results to COLMAP format
+    # Step 9: Write bundle adjusted results to COLMAP format
     t0 = time.perf_counter()
     suffix = getattr(args, "output_suffix", "")
     file_dir = f"gluemap_aba{suffix}"
@@ -715,10 +688,7 @@ def run_refinement_pipeline(
         f"  Iterations: {sum(it['total'] for it in iteration_timings):.2f}s "
         f"({len(iteration_timings)} iters)"
     )
-    logger.info(
-        f"  Cleanup: remove_virtual={refinement_timing['remove_virtual']:.2f}s, "
-        f"write={refinement_timing['write_output']:.2f}s"
-    )
+    
     logger.info(f"  Total refinement: {refinement_timing['total']:.2f}s")
 
     return file_dir, refinement_timing
