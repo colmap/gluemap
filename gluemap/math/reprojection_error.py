@@ -371,11 +371,15 @@ def filter_observations_by_error(
     return num_observations_removed, num_tracks_removed
 
 
-_PYCOLMAP_ERROR_TYPE = {
-    ReprojectionErrorType.PIXEL: pycolmap.ReprojectionErrorType.PIXEL,
-    ReprojectionErrorType.NORMALIZED: pycolmap.ReprojectionErrorType.NORMALIZED,
-    ReprojectionErrorType.ANGULAR: pycolmap.ReprojectionErrorType.ANGULAR,
-}
+# Our own ReprojectionErrorType is retained for backward compatibility with colmap of older version
+if hasattr(pycolmap, "ReprojectionErrorType"):
+    _PYCOLMAP_ERROR_TYPE = {
+        ReprojectionErrorType.PIXEL: pycolmap.ReprojectionErrorType.PIXEL,
+        ReprojectionErrorType.NORMALIZED: pycolmap.ReprojectionErrorType.NORMALIZED,
+        ReprojectionErrorType.ANGULAR: pycolmap.ReprojectionErrorType.ANGULAR,
+    }
+else:
+    _PYCOLMAP_ERROR_TYPE = None
 
 
 def filter_reconstruction_by_reprojection_error_colmap(
@@ -390,8 +394,14 @@ def filter_reconstruction_by_reprojection_error_colmap(
 
     Cannot account for virtual points, negative-depth observations, or
     per-image fisheye overrides — callers must only invoke this when those are
-    absent. Returns (observations_removed, tracks_removed).
+    absent. Raises if the pycolmap version does not expose
+    ``ReprojectionErrorType``. Returns (observations_removed, tracks_removed).
     """
+    if _PYCOLMAP_ERROR_TYPE is None:
+        raise RuntimeError(
+            "pycolmap.ReprojectionErrorType is not available in this pycolmap "
+            "version; the in-Python reprojection-error filter must be used."
+        )
     num_points_before = len(reconstruction.points3D)
     obs_manager = pycolmap.ObservationManager(reconstruction)
     points3d_ids = set(reconstruction.points3D.keys())
