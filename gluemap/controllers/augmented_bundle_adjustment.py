@@ -14,7 +14,6 @@ from gluemap.controllers.bundle_adjustment import (
     build_negative_depth_observations,
     build_reconstruction_for_ba,
     build_virtual_point_start,
-    filter_observations_by_error,
     initialize_world_points,
     iterative_bundle_adjustment,
 )
@@ -24,7 +23,7 @@ from gluemap.estimators.track_establishment import (
 )
 from gluemap.math.reprojection_error import (
     ReprojectionErrorType,
-    compute_all_errors_from_reconstruction,
+    filter_reconstruction_by_reprojection_error,
 )
 from gluemap.utils.colmap import (
     camera_from_intrinsics_matrix,
@@ -225,89 +224,6 @@ def reindex_reconstruction_for_triangulation(
         new_recon.add_point3D(point3D.xyz, new_track)
 
     return new_recon
-
-
-def filter_reconstruction_by_angular_error(
-    reconstruction: pycolmap.Reconstruction,
-    angular_error_threshold_deg: float,
-    negative_depth_observations: dict,
-    virtual_point_start: dict,
-    fisheye_cameras=None,
-):
-    """Filter the reconstruction in place using an angular reprojection error
-    threshold, logging error statistics and the number of removed observations
-    / tracks."""
-    logger.info(
-        f"Filtering reconstruction by angular error "
-        f"(threshold={angular_error_threshold_deg} deg)..."
-    )
-    angular_errors = compute_all_errors_from_reconstruction(
-        reconstruction,
-        ReprojectionErrorType.ANGULAR,
-        negative_depth_observations,
-        virtual_point_start=virtual_point_start,
-        fisheye_cameras=fisheye_cameras,
-    )
-
-    all_angular = [
-        e
-        for errs in angular_errors.values()
-        for _, _, e in errs
-        if e < float("inf")
-    ]
-    if len(all_angular) > 0:
-        all_angular_arr = np.array(all_angular)
-        logger.info(
-            f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
-            f"median={np.median(all_angular_arr):.2f} deg, "
-            f"max={np.max(all_angular_arr):.2f} deg"
-        )
-        logger.info(
-            f"  < {angular_error_threshold_deg} deg: "
-            f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
-        )
-
-    num_points_before = len(reconstruction.points3D)
-    obs_removed, tracks_removed = filter_observations_by_error(
-        reconstruction,
-        angular_errors,
-        angular_error_threshold_deg,
-        min_track_length=2,
-    )
-    logger.info(
-        f"  Angular filter: removed {obs_removed} observations, "
-        f"{tracks_removed} tracks"
-    )
-    logger.info(
-        f"  Points3D: {num_points_before} -> {len(reconstruction.points3D)}"
-    )
-
-
-def filter_reconstruction_by_angular_error_colmap(
-    reconstruction: pycolmap.Reconstruction,
-    angular_error_threshold_deg: float,
-):
-    """Filter the reconstruction in place using pycolmap's built-in
-    ObservationManager angular reprojection error filter."""
-    logger.info(
-        f"Filtering reconstruction by angular error via pycolmap "
-        f"(threshold={angular_error_threshold_deg} deg)..."
-    )
-    num_points_before = len(reconstruction.points3D)
-    obs_manager = pycolmap.ObservationManager(reconstruction)
-    points3d_ids = {pid for pid, _ in reconstruction.points3D.items()}
-    num_filtered = (
-        obs_manager.filter_points3D_with_large_reprojection_error(
-            angular_error_threshold_deg,
-            points3d_ids,
-            pycolmap.ReprojectionErrorType.ANGULAR,
-        )
-    )
-    obs_manager.filter_points3D_with_short_tracks(min_track_length=2)
-    logger.info(
-        f"  pycolmap filter removed {num_filtered} observations, "
-        f"points3D {num_points_before} -> {len(reconstruction.points3D)}"
-    )
 
 
 def run_refinement_pipeline(
@@ -580,33 +496,27 @@ def run_refinement_pipeline(
         # Step 7.5: Filter tracks before bundle adjustment
         t_filter_start = time.perf_counter()
         if angular_error_threshold_deg > 0:
-            # Real reconstruction: try pycolmap's built-in observation filter,
-            # fall back to filter_reconstruction_by_angular_error on failure
-            try:
-                filter_reconstruction_by_angular_error_colmap(
-                    reconstruction,
+            for recon, neg_depth, vp_start, fisheye, label in (
+                (reconstruction, None, None, None, "real: "),
+                (
+                    virtual_reconstruction,
+                    negative_depth_observations,
+                    virtual_point_start,
+                    fisheye_cameras,
+                    "virtual: ",
+                ),
+            ):
+                if recon is None:
+                    continue
+                filter_reconstruction_by_reprojection_error(
+                    recon,
+                    ReprojectionErrorType.ANGULAR,
                     angular_error_threshold_deg,
+                    negative_depth_observations=neg_depth,
+                    virtual_point_start=vp_start,
+                    fisheye_cameras=fisheye,
+                    log_prefix=label,
                 )
-            except Exception as e:
-                logger.warning(
-                    f"pycolmap observation filter failed ({e}); "
-                    f"falling back to filter_reconstruction_by_angular_error"
-                )
-                filter_reconstruction_by_angular_error(
-                    reconstruction,
-                    angular_error_threshold_deg,
-                    dict(),  # no negative depth filtering for real tracks
-                    dict(),
-                )
-
-            # Virtual reconstruction: keep the angular-error filter path
-            filter_reconstruction_by_angular_error(
-                virtual_reconstruction,
-                angular_error_threshold_deg,
-                negative_depth_observations,
-                virtual_point_start,
-                fisheye_cameras=fisheye_cameras,
-            )
 
         t_filter_end = time.perf_counter()
 

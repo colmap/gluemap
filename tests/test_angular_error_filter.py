@@ -1,5 +1,5 @@
-"""Tests that filter_reconstruction_by_angular_error produces the same results
-as filter_reconstruction_by_angular_error_colmap."""
+"""Tests that filter_reconstruction_by_reprojection_error (in-Python angular
+path) produces the same results as filter_reconstruction_by_reprojection_error_colmap."""
 
 import copy
 import logging
@@ -7,9 +7,10 @@ import logging
 import numpy as np
 import pytest
 
-from gluemap.controllers.augmented_bundle_adjustment import (
-    filter_reconstruction_by_angular_error,
-    filter_reconstruction_by_angular_error_colmap,
+from gluemap.math.reprojection_error import (
+    ReprojectionErrorType,
+    filter_reconstruction_by_reprojection_error,
+    filter_reconstruction_by_reprojection_error_colmap,
 )
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
@@ -17,17 +18,22 @@ logger = logging.getLogger(__name__)
 
 
 def _apply_colmap_filter(reconstruction, threshold):
-    """Filter using filter_reconstruction_by_angular_error_colmap."""
-    filter_reconstruction_by_angular_error_colmap(reconstruction, threshold)
+    """Filter using filter_reconstruction_by_reprojection_error_colmap."""
+    filter_reconstruction_by_reprojection_error_colmap(
+        reconstruction,
+        ReprojectionErrorType.ANGULAR,
+        threshold,
+        min_track_length=2,
+    )
 
 
 def _apply_custom_filter(reconstruction, threshold):
-    """Filter using filter_reconstruction_by_angular_error."""
-    filter_reconstruction_by_angular_error(
+    """Filter using filter_reconstruction_by_reprojection_error."""
+    filter_reconstruction_by_reprojection_error(
         reconstruction,
+        ReprojectionErrorType.ANGULAR,
         threshold,
-        negative_depth_observations=dict(),
-        virtual_point_start=dict(),
+        min_track_length=2,
     )
 
 

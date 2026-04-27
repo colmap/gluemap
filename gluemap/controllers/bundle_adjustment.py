@@ -16,8 +16,8 @@ import pycolmap
 from gluemap.estimators.bundle_adjustment import bundle_adjustment
 from gluemap.math.reprojection_error import (
     ReprojectionErrorType,
-    compute_all_errors_from_reconstruction,
     compute_point_error,
+    filter_reconstruction_by_reprojection_error,
 )
 from gluemap.utils.colmap import camera_from_intrinsics_matrix
 
@@ -291,7 +291,7 @@ def prune_track_outliers(points3D, inlier_mask):
     logger.info(f"Pruned {total_outliers_removed} outlier observations")
     logger.info(f"Removed {len(points_to_remove)} tracks with < 2 inliers")
 
-
+# TODO: remove the initialization of real points.
 def initialize_world_points(
     predictions_dict,
     global_rotations,
@@ -576,67 +576,6 @@ def initialize_world_points(
     return points3D
 
 
-def filter_observations_by_error(
-    reconstruction: pycolmap.Reconstruction,
-    errors_per_track: dict[int, list[tuple[int, int, float]]],
-    reproj_threshold: float,
-    min_track_length: int,
-) -> tuple[int, int]:
-    """
-    Filter observations with high reprojection errors from a reconstruction.
-
-    Wholesale track removal goes through ``Reconstruction.delete_point3D``.
-    Per-observation outliers are dropped by hand with
-    ``Point3D.track.delete_element`` + ``Image.reset_point3D_for_point2D``
-    (mirroring COLMAP's C++ core), which keeps ``image.points2D[i].point3D_id``
-    consistent with the track without triggering pycolmap's auto-delete of
-    tracks that drop below 2 elements.
-
-    Args:
-        reconstruction: pycolmap.Reconstruction (modified in place).
-        errors_per_track: Reprojection errors from
-            ``compute_all_errors_from_reconstruction``.
-        reproj_threshold: Maximum allowed reprojection error.
-        min_track_length: Minimum observations to keep a track; tracks with
-            fewer surviving inliers are deleted wholesale.
-
-    Returns:
-        (num_observations_removed, num_tracks_removed).
-    """
-    num_observations_removed = 0
-    num_tracks_removed = 0
-
-    for point3D_id, track_errors in errors_per_track.items():
-        if point3D_id not in reconstruction.points3D:
-            continue
-
-        point3D = reconstruction.points3D[point3D_id]
-        elements = list(point3D.track.elements)
-
-        outlier_obs = []  # (image_id, pt_idx) pairs to delete individually
-        inlier_count = 0
-
-        for (image_id, pt_idx, error), elem in zip(track_errors, elements):
-            if error < reproj_threshold:
-                inlier_count += 1
-            else:
-                outlier_obs.append((elem.image_id, elem.point2D_idx))
-
-        if inlier_count < min_track_length:
-            # Not enough inliers to keep the track at all.
-            reconstruction.delete_point3D(point3D_id)
-            num_observations_removed += len(elements)
-            num_tracks_removed += 1
-        else:
-            for image_id, pt_idx in outlier_obs:
-                image = reconstruction.images[image_id]
-                point3D.track.delete_element(image_id, pt_idx)
-                image.reset_point3D_for_point2D(pt_idx)
-                num_observations_removed += 1
-
-    return num_observations_removed, num_tracks_removed
-
-
 def iterative_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -758,58 +697,32 @@ def iterative_bundle_adjustment(
             scaling = max(3 - iteration, 1)
             current_threshold = scaling * options.normalized_reproj_threshold
 
-            # Compute reprojection errors (normalized) on each reconstruction
-            errors_real = compute_all_errors_from_reconstruction(
-                reconstruction,
-                ReprojectionErrorType.NORMALIZED,
-                {},
-                virtual_point_start={},  # No virtual points in real reconstruction
-                fisheye_cameras=None,
-            )
-            errors_virtual = (
-                compute_all_errors_from_reconstruction(
-                    virtual_reconstruction,
-                    ReprojectionErrorType.NORMALIZED,
-                    negative_depth_observations,
-                    virtual_point_start=virtual_point_start,
-                    fisheye_cameras=fisheye_cameras,
-                )
-                if virtual_reconstruction is not None
-                else {}
-            )
-
-            # Print error statistics before filtering
-            all_errors = [
-                e
-                for errs in list(errors_real.values()) + list(errors_virtual.values())
-                for _, _, e in errs
-                if e < float("inf")
-            ]
-            if len(all_errors) > 0:
-                logger.debug(
-                    f"Normalized reprojection errors (threshold={current_threshold:.4f}):"
-                )
-                logger.debug(
-                    f"  Mean: {np.mean(all_errors):.6f}, Median: {np.median(all_errors):.6f}"
-                )
-                logger.debug(
-                    f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%"
-                )
-
-            # Filter observations with high errors on each reconstruction independently
             obs_removed_total = 0
             tracks_removed_total = 0
-            for recon, errs in (
-                (reconstruction, errors_real),
-                (virtual_reconstruction, errors_virtual),
+            for recon, neg_depth, vp_start, fisheye, label in (
+                (reconstruction, None, None, None, "real: "),
+                (
+                    virtual_reconstruction,
+                    negative_depth_observations,
+                    virtual_point_start,
+                    fisheye_cameras,
+                    "virtual: ",
+                ),
             ):
-                if recon is None or not errs:
+                if recon is None:
                     continue
-                obs_removed, tracks_removed = filter_observations_by_error(
-                    recon,
-                    errs,
-                    current_threshold,
-                    options.min_track_length,
+                obs_removed, tracks_removed = (
+                    filter_reconstruction_by_reprojection_error(
+                        recon,
+                        ReprojectionErrorType.NORMALIZED,
+                        current_threshold,
+                        options.min_track_length,
+                        negative_depth_observations=neg_depth,
+                        virtual_point_start=vp_start,
+                        fisheye_cameras=fisheye,
+                        log_level=logging.DEBUG,
+                        log_prefix=label,
+                    )
                 )
                 obs_removed_total += obs_removed
                 tracks_removed_total += tracks_removed
