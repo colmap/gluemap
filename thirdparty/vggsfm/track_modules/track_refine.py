@@ -367,7 +367,7 @@ def compute_score_fn(
     """
 
     from kornia.geometry.subpix import dsnt
-    from kornia.utils.grid import create_meshgrid
+    from kornia.geometry.grid import create_meshgrid
 
     # query_point_feat initial shape: B x N x C_out,
     # query_point_feat indicates the feat at the coorponsing query points
