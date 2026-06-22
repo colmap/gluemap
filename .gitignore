@@ -4,3 +4,5 @@ results/
 venv_gluemap/
 
 *.pyc
+.pixi/*
+!.pixi/config.toml

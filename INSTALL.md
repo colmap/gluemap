@@ -87,6 +87,16 @@ default conda-forge `ceres-solver` is CPU-only — for the CUDA path,
 build Ceres from source against your CUDA toolkit and point
 `CMAKE_PREFIX_PATH` at it.
 
+### Option C — Pixi package manager
+
+As an alternative, Pixi package manager https://github.com/prefix-dev/pixi could be used to create an environment with all required dependencies. This environment is configured to have torch that supports Blackwell (sm_120) gpus. Also, ceres-solver will be built with support for cuDSS sparse linear solver.
+```
+pixi install --locked
+pixi run install-gluemap
+pixi shell
+```
+After populating and activating the environment, go to step 4.
+
 ## 3. Install GLUEMAP
 
 From the repo root, in your active Python ≥ 3.10 environment:

@@ -13,3 +13,12 @@
 [submodule "thirdparty/mapanything"]
 	path = thirdparty/mapanything
 	url = https://github.com/facebookresearch/map-anything.git
+[submodule "thirdparty/ceres-solver"]
+	path = thirdparty/ceres-solver
+	url = https://ceres-solver.googlesource.com/ceres-solver
+[submodule "thirdparty/pyceres"]
+	path = thirdparty/pyceres
+	url = https://github.com/cvg/pyceres.git
+[submodule "thirdparty/colmap"]
+	path = thirdparty/colmap
+	url = https://github.com/colmap/colmap.git
